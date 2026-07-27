@@ -1,19 +1,8 @@
 from PIL import Image
 import sys
-import os
 
 # 检查是否为打包环境
 is_frozen = getattr(sys, 'frozen', False)
-
-# 在打包环境中禁用 tqdm
-if not is_frozen:
-    from tqdm import tqdm
-else:
-    # 在打包环境中，创建一个简单的替代函数
-    def tqdm(iterable=None, desc=None, **kwargs):
-        if desc:
-            print(f"{desc}...")
-        return iterable
 
 def create_vertical_slice(images, position, linear=False):
     img_w, img_h = images[0].size
@@ -21,8 +10,9 @@ def create_vertical_slice(images, position, linear=False):
     result = Image.new('RGB', (img_w, img_h))
     strip_width = max(1, img_w // num_images)
 
-    print("生成纵向切片...")
-    for i, img in enumerate(tqdm(images, desc="处理图片")):
+    if not is_frozen:
+        print("生成纵向切片...", end="", flush=True)
+    for i, img in enumerate(images):
         if linear:
             crop_x = int(i * (img_w - strip_width) / (num_images - 1)) if num_images > 1 else 0
         else:
@@ -49,4 +39,6 @@ def create_vertical_slice(images, position, linear=False):
 
         result.paste(strip, (paste_x, 0))
 
+    if not is_frozen:
+        print("完成")
     return result

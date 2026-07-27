@@ -1,20 +1,9 @@
 from PIL import Image, ImageDraw
 import numpy as np
 import sys
-import os
 
 # 检查是否为打包环境
 is_frozen = getattr(sys, 'frozen', False)
-
-# 在打包环境中禁用 tqdm
-if not is_frozen:
-    from tqdm import tqdm
-else:
-    # 在打包环境中，创建一个简单的替代函数
-    def tqdm(iterable=None, desc=None, **kwargs):
-        if desc:
-            print(f"{desc}...")
-        return iterable
 
 def create_horizontal_s_slice(images, position="center", linear=False):
     """
@@ -30,8 +19,9 @@ def create_horizontal_s_slice(images, position="center", linear=False):
     result = Image.new('RGB', (img_w, img_h))
     strip_height = img_h / num_images
 
-    print("生成水平S型曲线切片...")
-    for i, img in enumerate(tqdm(images, desc="处理图片")):
+    if not is_frozen:
+        print("生成水平S型曲线切片...", end="", flush=True)
+    for i, img in enumerate(images):
         # 当前条带的目标位置（结果图中固定占用的横向区域，保证无缝覆盖）
         y0 = i * strip_height
         y1 = (i + 1) * strip_height
@@ -117,4 +107,6 @@ def create_horizontal_s_slice(images, position="center", linear=False):
         band_mask = mask.crop((0, int(round(y0)), img_w, int(round(y1))))
         result.paste(src_region, (0, int(round(y0))), band_mask)
 
+    if not is_frozen:
+        print("完成")
     return result

@@ -1,19 +1,8 @@
 from PIL import Image, ImageDraw
 import sys
-import os
 
 # 检查是否为打包环境
 is_frozen = getattr(sys, 'frozen', False)
-
-# 在打包环境中禁用 tqdm
-if not is_frozen:
-    from tqdm import tqdm
-else:
-    # 在打包环境中，创建一个简单的替代函数
-    def tqdm(iterable=None, desc=None, **kwargs):
-        if desc:
-            print(f"{desc}...")
-        return iterable
 
 def create_circular_sector_slice(images, linear=False):
     img = images[0]
@@ -24,8 +13,9 @@ def create_circular_sector_slice(images, linear=False):
     result = Image.new('RGB', (img_w, img_h), (0, 0, 0))
     angle_step = 360 / num_images
 
-    print("生成圆形扇形切片...")
-    for i, src_img in enumerate(tqdm(images, desc="处理图片")):
+    if not is_frozen:
+        print("生成圆形扇形切片...", end="", flush=True)
+    for i, src_img in enumerate(images):
         start_angle = i * angle_step
         end_angle = (i + 1) * angle_step
         if not linear:
@@ -43,4 +33,6 @@ def create_circular_sector_slice(images, linear=False):
         masked_img = Image.composite(src_img, result, mask)
         result.paste(masked_img, (0, 0))
 
+    if not is_frozen:
+        print("完成")
     return result

@@ -47,7 +47,8 @@ class TimesliceWorker(QThread):
             from utils import load_images
             images = load_images(self.params['input_dir'],
                                  self.params['sort_by'],
-                                 self.params['reverse'])
+                                 self.params['reverse'],
+                                 self.params.get('lang', 'en'))
             total_images = len(images)
 
             if total_images == 0:
@@ -70,6 +71,8 @@ class TimesliceWorker(QThread):
                 include_timestamp=self.params['include_timestamp'],
                 include_slice_type=self.params['include_slice_type'],
                 extension=self.params['extension'],
+                lang=self.params.get('lang', 'en'),
+                timestamp_source=self.params.get('timestamp_source', 'composition'),
                 progress_callback=progress_callback
             )
 
@@ -438,9 +441,55 @@ class TimesliceGUI(QMainWindow):
         self.settings.setValue("language", lang)
         self.translator.load_translations(lang)
 
+        # 重建前先保存用户已填写的设置（路径、选项等）
+        state = self._capture_ui_state()
         # 重新初始化UI并更新菜单标记
         self.init_ui()
         self.load_theme()
+        # 重建后恢复设置，避免语言切换导致清空
+        self._restore_ui_state(state)
+
+    def _capture_ui_state(self):
+        """重建UI前保存用户已设置的各项值"""
+        return {
+            'input_dir': self.input_dir_edit.text(),
+            'output_dir': self.output_dir_edit.text(),
+            'basename': self.basename_edit.text(),
+            'type_index': self.type_combo.currentIndex(),
+            'position_index': self.position_combo.currentIndex(),
+            'sort_index': self.sort_combo.currentIndex(),
+            'extension_index': self.extension_combo.currentIndex(),
+            'timestamp_source_index': self.timestamp_source_combo.currentIndex(),
+            'linear': self.linear_switch.isChecked(),
+            'reverse': self.reverse_check.isChecked(),
+            'auto_open': self.auto_open_check.isChecked(),
+            'timestamp': self.timestamp_check.isChecked(),
+            'slice_type': self.slice_type_check.isChecked(),
+        }
+
+    def _restore_ui_state(self, state):
+        """重建UI后恢复用户设置"""
+        self.input_dir_edit.setText(state['input_dir'])
+        self.output_dir_edit.setText(state['output_dir'])
+        self.basename_edit.setText(state['basename'])
+
+        # 先恢复切片类型（会触发 update_controls_state 重建位置/线性选项）
+        self.type_combo.setCurrentIndex(state['type_index'])
+        # 再恢复位置索引（与类型选项顺序一致）
+        self.position_combo.setCurrentIndex(state['position_index'])
+
+        self.sort_combo.setCurrentIndex(state['sort_index'])
+        self.extension_combo.setCurrentIndex(state['extension_index'])
+        self.linear_switch.setChecked(state['linear'])
+        self.reverse_check.setChecked(state['reverse'])
+        self.auto_open_check.setChecked(state['auto_open'])
+        self.timestamp_check.setChecked(state['timestamp'])
+        self.slice_type_check.setChecked(state['slice_type'])
+        self.timestamp_source_combo.setCurrentIndex(state['timestamp_source_index'])
+
+        # 刷新依赖状态与文件名预览
+        self.update_timestamp_source_state()
+        self.update_filename_preview()
 
     def update_menu_check_state(self):
         """更新菜单选中标记（✓）"""
@@ -461,15 +510,11 @@ class TimesliceGUI(QMainWindow):
         font.setFamily("SimHei")
         self.setFont(font)
 
+        # 窗口标题（随语言切换刷新）
+        self.setWindowTitle(self.tr("时间切片照片生成器"))
+
         self.menu_bar = QMenuBar()
         self.setMenuBar(self.menu_bar)
-
-        # 文件菜单
-        self.file_menu = QMenu(self.tr("文件(&F)"))
-        self.menu_bar.addMenu(self.file_menu)
-        self.exit_action = QAction(self.tr("退出(&X)"), self)
-        self.exit_action.triggered.connect(self.close)
-        self.file_menu.addAction(self.exit_action)
 
         # 视图菜单（移除跟随系统）
         self.view_menu = QMenu(self.tr("视图(&V)"))
@@ -504,13 +549,6 @@ class TimesliceGUI(QMainWindow):
         self.english_action.setCheckable(True)  # 可选中
         self.english_action.triggered.connect(lambda: self.change_language('en'))
         self.lang_menu.addAction(self.english_action)
-
-        # 帮助菜单
-        self.help_menu = QMenu(self.tr("帮助(&H)"))
-        self.menu_bar.addMenu(self.help_menu)
-        self.about_action = QAction(self.tr("关于(&A)"), self)
-        self.about_action.triggered.connect(self.show_about)
-        self.help_menu.addAction(self.about_action)
 
         # 主布局
         main_layout = QVBoxLayout()
@@ -669,6 +707,23 @@ class TimesliceGUI(QMainWindow):
         suffix_layout.addWidget(self.slice_type_check)
         naming_layout.addLayout(suffix_layout)
 
+        # 时间戳来源
+        timestamp_source_layout = QHBoxLayout()
+        self.timestamp_source_label = QLabel(self.tr("时间戳来源:"))
+        self.timestamp_source_combo = QComboBox()
+        self.timestamp_source_combo.addItems([
+            self.tr("第一张照片拍摄时间"),
+            self.tr("最后一张照片拍摄时间"),
+            self.tr("第一张照片修改时间"),
+            self.tr("最后一张照片修改时间"),
+            self.tr("时间切片合成时间")
+        ])
+        self.timestamp_source_combo.setEnabled(False)
+        timestamp_source_layout.addWidget(self.timestamp_source_label)
+        timestamp_source_layout.addWidget(self.timestamp_source_combo)
+        timestamp_source_layout.addStretch()
+        naming_layout.addLayout(timestamp_source_layout)
+
         # 文件名预览
         preview_layout = QHBoxLayout()
         self.preview_label = QLabel(self.tr("预览:"))
@@ -686,9 +741,9 @@ class TimesliceGUI(QMainWindow):
         self.progress_group = QGroupBox(self.tr("进度信息"))
         progress_layout = QVBoxLayout()
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setRange(0, 100)  # 导入前显示静止的 0%，无动画
         self.progress_bar.setValue(0)
-        self.progress_bar.setFormat(self.tr("已处理 %v/%m 张"))
+        self.progress_bar.setFormat(self.tr("已处理 %v 张"))
         progress_layout.addWidget(self.progress_bar)
 
         self.error_log = QTextEdit()
@@ -720,16 +775,20 @@ class TimesliceGUI(QMainWindow):
         # 连接预览更新信号
         self.basename_edit.textChanged.connect(self.update_filename_preview)
         self.extension_combo.currentTextChanged.connect(self.update_filename_preview)
-        self.timestamp_check.stateChanged.connect(self.update_filename_preview)
+        self.timestamp_check.stateChanged.connect(self.update_timestamp_source_state)
+        self.timestamp_source_combo.currentTextChanged.connect(self.update_filename_preview)
         self.slice_type_check.stateChanged.connect(self.update_filename_preview)
         self.type_combo.currentIndexChanged.connect(self.update_filename_preview)
+        self.sort_combo.currentIndexChanged.connect(self.update_filename_preview)
+        self.reverse_check.stateChanged.connect(self.update_filename_preview)
+        self.input_dir_edit.textChanged.connect(self.update_filename_preview)
 
         # 初始化菜单选中状态 - 启动时自动选中中文和浅色模式
         self.update_menu_check_state()
 
     def update_filename_preview(self):
-        """更新文件名预览"""
-        from datetime import datetime
+        """更新文件名预览（含真实时间戳来源）"""
+        from utils import compute_timestamp
 
         # 获取当前设置
         basename = self.basename_edit.text().strip() or "timeslice"
@@ -737,26 +796,44 @@ class TimesliceGUI(QMainWindow):
         include_timestamp = self.timestamp_check.isChecked()
         include_slice_type = self.slice_type_check.isChecked()
 
-        # 获取切片类型
+        # 获取切片类型（文件名简称随语言切换）
         slice_type_map = {
-            self.tr("垂直切片"): "垂直",
-            self.tr("水平切片"): "水平",
-            self.tr("圆形扇形切片"): "圆形扇形",
-            self.tr("椭圆形扇形切片"): "椭圆形扇形",
-            self.tr("椭圆形环带切片"): "椭圆形环带",
-            self.tr("矩形环带切片"): "矩形环带",
-            self.tr("圆形环带切片"): "圆形环带",
-            self.tr("垂直S型曲线"): "垂直S型",
-            self.tr("水平S型曲线"): "水平S型"
+            self.tr("垂直切片"): self.tr("垂直"),
+            self.tr("水平切片"): self.tr("水平"),
+            self.tr("圆形扇形切片"): self.tr("圆形扇形"),
+            self.tr("椭圆形扇形切片"): self.tr("椭圆形扇形"),
+            self.tr("椭圆形环带切片"): self.tr("椭圆形环带"),
+            self.tr("矩形环带切片"): self.tr("矩形环带"),
+            self.tr("圆形环带切片"): self.tr("圆形环带"),
+            self.tr("垂直S型曲线"): self.tr("垂直S型"),
+            self.tr("水平S型曲线"): self.tr("水平S型")
         }
         slice_type_text = slice_type_map.get(self.type_combo.currentText(), "")
+
+        # 排序映射
+        sort_map = {
+            self.tr("按文件名"): "name",
+            self.tr("按创建时间"): "created_time",
+            self.tr("按修改时间"): "modified_time"
+        }
+        sort_by = sort_map.get(self.sort_combo.currentText(), "name")
 
         # 构建文件名部分
         parts = [basename]
 
         if include_timestamp:
-            # 使用示例时间戳
-            parts.append("20231220_143000")
+            source_map = {
+                self.tr("第一张照片拍摄时间"): "first_capture",
+                self.tr("最后一张照片拍摄时间"): "last_capture",
+                self.tr("第一张照片修改时间"): "first_modified",
+                self.tr("最后一张照片修改时间"): "last_modified",
+                self.tr("时间切片合成时间"): "composition"
+            }
+            source = source_map.get(self.timestamp_source_combo.currentText(), "composition")
+            ts = compute_timestamp(source, self.input_dir_edit.text(), sort_by, self.reverse_check.isChecked())
+            if ts is None:
+                ts = "YYYYMMDD_HHMMSS"
+            parts.append(ts)
 
         if include_slice_type and slice_type_text:
             parts.append(slice_type_text)
@@ -774,6 +851,12 @@ class TimesliceGUI(QMainWindow):
 
         preview_text = f"{filename}.{extension}"
         self.filename_preview.setText(preview_text)
+
+    def update_timestamp_source_state(self):
+        """时间戳复选框切换时启用/禁用来源下拉框并刷新预览"""
+        enabled = self.timestamp_check.isChecked()
+        self.timestamp_source_combo.setEnabled(enabled)
+        self.update_filename_preview()
 
     def update_controls_state(self, index):
         """更新控件状态"""
@@ -959,6 +1042,7 @@ class TimesliceGUI(QMainWindow):
         dir_path = QFileDialog.getExistingDirectory(self, self.tr("选择输入目录"))
         if dir_path:
             self.input_dir_edit.setText(dir_path)
+            self.update_filename_preview()
 
     def select_output_dir(self):
         """选择输出目录"""
@@ -1012,6 +1096,16 @@ class TimesliceGUI(QMainWindow):
         }
         sort_by = sort_map.get(self.sort_combo.currentText(), "name")
 
+        # 映射时间戳来源
+        timestamp_source_map = {
+            self.tr("第一张照片拍摄时间"): "first_capture",
+            self.tr("最后一张照片拍摄时间"): "last_capture",
+            self.tr("第一张照片修改时间"): "first_modified",
+            self.tr("最后一张照片修改时间"): "last_modified",
+            self.tr("时间切片合成时间"): "composition"
+        }
+        timestamp_source = timestamp_source_map.get(self.timestamp_source_combo.currentText(), "composition")
+
         # 获取文件扩展名
         extension_map = {
             "JPG": "jpg",
@@ -1032,19 +1126,27 @@ class TimesliceGUI(QMainWindow):
             'output_basename': self.basename_edit.text().strip() or "timeslice",
             'include_timestamp': self.timestamp_check.isChecked(),
             'include_slice_type': self.slice_type_check.isChecked(),
-            'extension': extension
+            'extension': extension,
+            'lang': self.current_lang,
+            'timestamp_source': timestamp_source
         }
 
         # 重置状态
         self.error_log.clear()
         self.process_btn.setEnabled(False)
+        # 读取目录完成前，进度条显示静止的 0%，不播放动画
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat(self.tr("已处理 %v 张"))
 
         # 加载图片
         from utils import load_images
         try:
-            images = load_images(input_dir, sort_by, self.reverse_check.isChecked())
+            images = load_images(input_dir, sort_by, self.reverse_check.isChecked(), self.current_lang)
             self.total_images = len(images)
+            # 目录读取完成后才显示总照片数
             self.progress_bar.setRange(0, self.total_images)
+            self.progress_bar.setFormat(self.tr("已处理 %v/%m 张"))
             self.progress_bar.setValue(0)
 
             if self.total_images == 0:
@@ -1090,13 +1192,6 @@ class TimesliceGUI(QMainWindow):
                 os.startfile(output_path)
             except Exception as e:
                 self.error_log.append(f"{self.tr('无法打开图片:')} {str(e)}")
-
-    def show_about(self):
-        """关于对话框"""
-        QMessageBox.about(self, self.tr("关于"),
-                          f"{self.tr('时间切片照片生成器')}\n\n"
-                          f"{self.tr('版本 4.3')}\n"
-                          f"{self.tr('适用于Windows系统的时间切片照片生成工具')}")
 
     def closeEvent(self, event):
         """关闭窗口"""

@@ -29,16 +29,17 @@ def get_translator(lang):
     return translator
 
 
-def generate_output_filename(base_name, include_timestamp, include_slice_type, slice_type, extension):
-    """生成输出文件名"""
+def generate_output_filename(base_name, include_timestamp, include_slice_type, slice_type, extension, timestamp_str=None, lang='en'):
+    """生成输出文件名（切片类型名称随语言切换）"""
+    translator = get_translator(lang)
     parts = [base_name]
 
     if include_timestamp:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = timestamp_str if timestamp_str else datetime.now().strftime("%Y%m%d_%H%M%S")
         parts.append(timestamp)
 
     if include_slice_type:
-        # 映射切片类型为中文或英文简称
+        # 切片类型简称（经翻译器转换，支持中英文）
         type_map = {
             "vertical": "垂直",
             "horizontal": "水平",
@@ -50,7 +51,7 @@ def generate_output_filename(base_name, include_timestamp, include_slice_type, s
             "vertical_s": "垂直S型",
             "horizontal_s": "水平S型"
         }
-        type_name = type_map.get(slice_type, slice_type)
+        type_name = translator.tr(type_map.get(slice_type, slice_type))
         parts.append(type_name)
 
     # 用"-"连接所有部分
@@ -65,9 +66,10 @@ def generate_output_filename(base_name, include_timestamp, include_slice_type, s
 
 def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=False, reverse=False,
                   sort_by='name', output_basename='timeslice', include_timestamp=False,
-                  include_slice_type=False, extension='jpg', progress_callback=None):
+                  include_slice_type=False, extension='jpg', progress_callback=None,
+                  lang='en', timestamp_source='composition'):
     """生成时间切片（仅Windows）"""
-    translator = get_translator('en')
+    translator = get_translator(lang)
 
     # 确保输入目录存在
     if not os.path.exists(input_dir):
@@ -83,13 +85,23 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
     if not os.access(output_dir, os.W_OK):
         raise Exception(f"{translator.tr('输出目录不可写:')} {output_dir}")
 
+    # 计算时间戳（若需要）
+    timestamp_str = None
+    if include_timestamp:
+        from utils import compute_timestamp
+        timestamp_str = compute_timestamp(timestamp_source, input_dir, sort_by, reverse)
+        if timestamp_str is None:
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     # 生成输出文件名
     output_filename = generate_output_filename(
         base_name=output_basename,
         include_timestamp=include_timestamp,
         include_slice_type=include_slice_type,
         slice_type=slice_type,
-        extension=extension
+        extension=extension,
+        timestamp_str=timestamp_str,
+        lang=lang
     )
 
     output_path = Path(output_dir) / output_filename
@@ -227,6 +239,12 @@ def main():
         help=default_translator.tr("在文件名中包含时间戳")
     )
     parser.add_argument(
+        "--timestamp-source",
+        default="composition",
+        choices=["composition", "first_capture", "last_capture", "first_modified", "last_modified"],
+        help=default_translator.tr("时间戳来源：composition/first_capture/last_capture/first_modified/last_modified")
+    )
+    parser.add_argument(
         "--include-slice-type",
         action="store_true",
         help=default_translator.tr("在文件名中包含切片类型")
@@ -248,12 +266,6 @@ def main():
     translator = get_translator(args.language)
 
     try:
-        # 进度回调
-        def progress_callback(current):
-            if not is_frozen:
-                sys.stdout.write(f"\r{translator.tr('已处理')} {current} {translator.tr('张图片')}")
-                sys.stdout.flush()
-
         # 生成切片
         output_path = run_timeslice(
             input_dir=args.input,
@@ -267,11 +279,12 @@ def main():
             include_timestamp=args.include_timestamp,
             include_slice_type=args.include_slice_type,
             extension=args.extension,
-            progress_callback=progress_callback
+            lang=args.language,
+            timestamp_source=args.timestamp_source
         )
 
         # 输出结果
-        print(f"\n{translator.tr('处理完成!')}")
+        print(translator.tr('处理完成!'))
         print(f"{translator.tr('时间切片已保存至:')} {output_path}")
 
         # Windows自动打开（可选）
@@ -290,7 +303,7 @@ def main():
                     print(f"{translator.tr('无法打开图片:')} {output_path}")
 
     except Exception as e:
-        print(f"\n{translator.tr('错误:')} {str(e)}", file=sys.stderr)
+        print(f"{translator.tr('错误:')} {str(e)}", file=sys.stderr)
         if not is_frozen:
             traceback.print_exc()
         sys.exit(1)
