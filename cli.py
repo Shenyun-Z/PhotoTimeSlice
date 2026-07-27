@@ -132,9 +132,9 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
         elif slice_type == "circular_band":
             result = create_circular_band_slice(images)
         elif slice_type == "vertical_s":
-            result = create_vertical_s_slice(images)
+            result = create_vertical_s_slice(images, position, linear)
         elif slice_type == "horizontal_s":
-            result = create_horizontal_s_slice(images)
+            result = create_horizontal_s_slice(images, position, linear)
         else:
             raise ValueError(f"{translator.tr('未知切片类型:')} {slice_type}")
 
@@ -203,7 +203,7 @@ def main():
     parser.add_argument(
         "-l", "--linear",
         action="store_true",
-        help=default_translator.tr("启用线性模式")
+        help=default_translator.tr("启用线性模式（作用因切片类型而异，详见 README）")
     )
     parser.add_argument(
         "-r", "--reverse",

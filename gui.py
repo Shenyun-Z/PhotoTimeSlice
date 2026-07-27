@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QComboBox, QLineEdit, QCheckBox, QFileDialog, QProgressBar,
                              QGroupBox, QMessageBox, QTextEdit, QMenuBar, QMenu, QAction)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QEvent, QSettings, QTimer
-from PyQt5.QtGui import QPalette, QColor, QFont
+from PyQt5.QtGui import QPalette, QColor, QFont, QPainter, QMouseEvent
 
 # 配置调试日志（可选）
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -82,6 +82,89 @@ class TimesliceWorker(QThread):
         """翻译方法（线程内）"""
         translator = Translator()
         return translator.tr(text)
+
+
+class VerticalModeSwitch(QWidget):
+    """竖向滑动开关：上下滑动切换两种模式"""
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._checked = False
+        self._top_text = ""
+        self._bottom_text = ""
+        self._dragging = False
+        self._press_pos = 0
+        self.setFixedSize(40, 90)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_top_text(self, text):
+        self._top_text = text
+        self.update()
+
+    def set_bottom_text(self, text):
+        self._bottom_text = text
+        self.update()
+
+    def top_text(self):
+        return self._top_text
+
+    def bottom_text(self):
+        return self._bottom_text
+
+    def setChecked(self, checked):
+        if self._checked != checked:
+            self._checked = checked
+            self.update()
+            self.toggled.emit(self._checked)
+
+    def isChecked(self):
+        return self._checked
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if not self.isEnabled():
+            return
+        self._dragging = True
+        self._press_pos = event.pos().y()
+        mid = self.height() // 2
+        self.setChecked(event.pos().y() > mid)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self._dragging = False
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        palette = self.palette()
+        w = self.width()
+        track_w = 22
+        track_h = 70
+        track_x = (w - track_w) // 2
+        track_y = 10
+
+        # 轨道背景
+        track_color = QColor("#e0e0e0") if self.isEnabled() else QColor("#b0b0b0")
+        painter.setBrush(track_color)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(track_x, track_y, track_w, track_h, track_w // 2, track_w // 2)
+
+        # 滑块
+        knob_d = 18
+        if self._checked:
+            knob_y = track_y + track_h - knob_d - 2
+        else:
+            knob_y = track_y + 2
+        knob_x = track_x + (track_w - knob_d) // 2
+
+        if self.isEnabled():
+            knob_color = palette.color(QPalette.Highlight)
+        else:
+            knob_color = QColor("#bdbdbd")
+        painter.setBrush(knob_color)
+        painter.drawEllipse(knob_x, knob_y, knob_d, knob_d)
+
+        painter.end()
 
 
 class TimesliceGUI(QMainWindow):
@@ -322,6 +405,10 @@ class TimesliceGUI(QMainWindow):
             self.menu_bar.setStyleSheet(menu_style)
         self.setStyleSheet(menu_style)
 
+        # 主题切换后刷新线性模式选项文字的高亮颜色
+        if hasattr(self, 'linear_switch'):
+            self.refresh_linear_labels()
+
     def load_theme(self):
         """加载主题设置（默认浅色）"""
         theme = self.current_theme
@@ -512,17 +599,40 @@ class TimesliceGUI(QMainWindow):
         sort_layout.addWidget(self.sort_combo)
         slice_layout.addLayout(sort_layout)
 
+        # 拼接模式（竖向滑动开关 + 右侧选项文字）
+        linear_layout = QHBoxLayout()
+        linear_layout.setSpacing(8)
+        self.linear_mode_label = QLabel(self.tr("拼接模式:"))
+        self.linear_switch = VerticalModeSwitch()
+        self.linear_switch.toggled.connect(self.update_linear_mode_state)
+
+        # 右侧选项文字容器
+        labels_widget = QWidget()
+        labels_layout = QVBoxLayout(labels_widget)
+        labels_layout.setContentsMargins(0, 0, 0, 0)
+        labels_layout.setSpacing(0)
+        self.linear_top_label = QLabel()
+        self.linear_top_label.setWordWrap(True)
+        self.linear_bottom_label = QLabel()
+        self.linear_bottom_label.setWordWrap(True)
+        labels_layout.addWidget(self.linear_top_label)
+        labels_layout.addStretch()
+        labels_layout.addWidget(self.linear_bottom_label)
+
+        linear_layout.addWidget(self.linear_mode_label)
+        linear_layout.addWidget(self.linear_switch)
+        linear_layout.addWidget(labels_widget)
+        linear_layout.addStretch()
+        slice_layout.addLayout(linear_layout)
+
+        # 其他选项
         options_layout = QHBoxLayout()
-        self.linear_check = QCheckBox(self.tr("线性模式"))  # 初始文本，会根据切片类型更新
         self.reverse_check = QCheckBox(self.tr("逆序排序"))
         self.auto_open_check = QCheckBox(self.tr("完成后自动打开图片"))
 
-        # 连接线性模式复选框的状态改变信号
-        self.linear_check.stateChanged.connect(self.update_linear_mode_state)
-
-        options_layout.addWidget(self.linear_check)
         options_layout.addWidget(self.reverse_check)
         options_layout.addWidget(self.auto_open_check)
+        options_layout.addStretch()
         slice_layout.addLayout(options_layout)
 
         self.slice_group.setLayout(slice_layout)
@@ -688,10 +798,12 @@ class TimesliceGUI(QMainWindow):
             else:
                 self.position_combo.setCurrentIndex(1)  # 默认居中
 
-            # 垂直切片：线性模式控制条带水平位置变化
-            self.linear_check.setEnabled(True)
-            self.linear_check.setText(self.tr("条带位置线性变化"))
-            self.linear_check.setToolTip(self.tr("启用：条带从左到右线性移动\n禁用：条带在固定位置"))
+            # 垂直切片：线性模式控制是否从同一竖条位置裁切
+            self.linear_switch.setEnabled(True)
+            self.linear_top_label.setText(self.tr("取每张照片的同一位置后拼接"))
+            self.linear_bottom_label.setText(self.tr("取每张照片的不同位置后拼接"))
+            self.linear_switch.setChecked(False)
+            self.refresh_linear_labels()
 
         elif slice_type == self.tr("水平切片"):
             # 水平切片：顶部、居中、底部
@@ -708,10 +820,12 @@ class TimesliceGUI(QMainWindow):
             else:
                 self.position_combo.setCurrentIndex(1)  # 默认居中
 
-            # 水平切片：线性模式控制条带垂直位置变化
-            self.linear_check.setEnabled(True)
-            self.linear_check.setText(self.tr("条带位置线性变化"))
-            self.linear_check.setToolTip(self.tr("启用：条带从上到下线性移动\n禁用：条带在固定位置"))
+            # 水平切片：线性模式控制是否从同一横条位置裁切
+            self.linear_switch.setEnabled(True)
+            self.linear_top_label.setText(self.tr("取每张照片的同一位置后拼接"))
+            self.linear_bottom_label.setText(self.tr("取每张照片的不同位置后拼接"))
+            self.linear_switch.setChecked(False)
+            self.refresh_linear_labels()
 
         elif slice_type == self.tr("圆形扇形切片"):
             # 位置选项不可用
@@ -720,10 +834,12 @@ class TimesliceGUI(QMainWindow):
             self.position_combo.setCurrentIndex(0)
             self.position_combo.setEnabled(False)
 
-            # 圆形扇形切片：线性模式控制扇形半径变化
-            self.linear_check.setEnabled(True)
-            self.linear_check.setText(self.tr("扇形半径线性缩放"))
-            self.linear_check.setToolTip(self.tr("启用：扇形半径从中心到边缘线性变化\n禁用：所有扇形使用最大半径"))
+            # 圆形扇形切片：线性模式控制是否从同一扇形大小裁切
+            self.linear_switch.setEnabled(True)
+            self.linear_top_label.setText(self.tr("取每张照片的同一大小后拼接"))
+            self.linear_bottom_label.setText(self.tr("取每张照片的不同大小后拼接"))
+            self.linear_switch.setChecked(False)
+            self.refresh_linear_labels()
 
         elif slice_type == self.tr("椭圆形扇形切片"):
             # 位置选项不可用
@@ -732,10 +848,56 @@ class TimesliceGUI(QMainWindow):
             self.position_combo.setCurrentIndex(0)
             self.position_combo.setEnabled(False)
 
-            # 椭圆形扇形切片：线性模式控制椭圆半轴变化
-            self.linear_check.setEnabled(True)
-            self.linear_check.setText(self.tr("椭圆半轴线性缩放"))
-            self.linear_check.setToolTip(self.tr("启用：椭圆半轴从中心到边缘线性变化\n禁用：所有扇形使用最大半轴"))
+            # 椭圆形扇形切片：线性模式控制是否从同一椭圆大小裁切
+            self.linear_switch.setEnabled(True)
+            self.linear_top_label.setText(self.tr("取每张照片的同一大小后拼接"))
+            self.linear_bottom_label.setText(self.tr("取每张照片的不同大小后拼接"))
+            self.linear_switch.setChecked(False)
+            self.refresh_linear_labels()
+
+        elif slice_type == self.tr("垂直S型曲线"):
+            # 垂直S型曲线：同一位置模式下可选左侧/居中/右侧；不同位置模式禁用
+            self.position_combo.clear()
+            self.position_combo.addItems([
+                self.tr("左侧"),
+                self.tr("居中"),
+                self.tr("右侧")
+            ])
+            # 恢复之前选择的位置（如果存在）
+            position_index = self.position_combo.findText(current_position)
+            if position_index >= 0:
+                self.position_combo.setCurrentIndex(position_index)
+            else:
+                self.position_combo.setCurrentIndex(1)  # 默认居中
+
+            # 垂直S型曲线：线性模式控制是否从同一竖向位置裁切
+            self.linear_switch.setEnabled(True)
+            self.linear_top_label.setText(self.tr("取每张照片的同一位置后拼接"))
+            self.linear_bottom_label.setText(self.tr("取每张照片的不同位置后拼接"))
+            self.linear_switch.setChecked(False)
+            self.refresh_linear_labels()
+
+        elif slice_type == self.tr("水平S型曲线"):
+            # 水平S型曲线：同一位置模式下可选顶部/居中/底部；不同位置模式禁用
+            self.position_combo.clear()
+            self.position_combo.addItems([
+                self.tr("顶部"),
+                self.tr("居中"),
+                self.tr("底部")
+            ])
+            # 恢复之前选择的位置（如果存在）
+            position_index = self.position_combo.findText(current_position)
+            if position_index >= 0:
+                self.position_combo.setCurrentIndex(position_index)
+            else:
+                self.position_combo.setCurrentIndex(1)  # 默认居中
+
+            # 水平S型曲线：线性模式控制是否从同一横向位置裁切
+            self.linear_switch.setEnabled(True)
+            self.linear_top_label.setText(self.tr("取每张照片的同一位置后拼接"))
+            self.linear_bottom_label.setText(self.tr("取每张照片的不同位置后拼接"))
+            self.linear_switch.setChecked(False)
+            self.refresh_linear_labels()
 
         else:
             # 其他切片类型：位置选项不可用
@@ -744,37 +906,53 @@ class TimesliceGUI(QMainWindow):
             self.position_combo.setCurrentIndex(0)
             self.position_combo.setEnabled(False)
 
-            # 环带类型和S型曲线不支持线性模式
-            self.linear_check.setChecked(False)
-            self.linear_check.setEnabled(False)
-            self.linear_check.setText(self.tr("线性模式"))
-
-            # 设置具体的工具提示
-            if slice_type in [self.tr("椭圆形环带切片"), self.tr("矩形环带切片"), self.tr("圆形环带切片")]:
-                self.linear_check.setToolTip(self.tr("环带切片不支持线性模式\n环带从中心向外扩展，形成同心效果"))
-            elif slice_type in [self.tr("垂直S型曲线"), self.tr("水平S型曲线")]:
-                self.linear_check.setToolTip(self.tr("S型曲线不支持线性模式\n图片沿S形曲线无缝拼接"))
-            else:
-                self.linear_check.setToolTip(self.tr("该切片类型不支持线性模式"))
+            # 环带类型不支持线性模式
+            self.linear_switch.setChecked(False)
+            self.linear_switch.setEnabled(False)
+            self.linear_top_label.setText("")
+            self.linear_bottom_label.setText(self.tr("该切片类型不使用此选项"))
+            self.refresh_linear_labels()
 
         # 更新位置选项的启用状态（考虑线性模式）
         self.update_position_combo_state()
 
     def update_linear_mode_state(self):
-        """更新线性模式复选框状态变化时的控件状态"""
+        """更新线性模式开关状态变化时的控件状态"""
         # 更新位置组合框的启用状态
         self.update_position_combo_state()
+        # 更新右侧选项文字的高亮状态
+        self.refresh_linear_labels()
 
     def update_position_combo_state(self):
         """更新位置组合框的启用状态"""
         slice_type = self.type_combo.currentText()
-        is_linear = self.linear_check.isChecked()
+        is_linear = self.linear_switch.isChecked()
 
-        # 只有在垂直/水平切片且未启用线性模式时，位置选项才可用
-        if slice_type in [self.tr("垂直切片"), self.tr("水平切片")] and not is_linear:
+        # 垂直/水平切片以及垂直/水平 S 型曲线，在未启用线性模式时，位置选项才可用
+        if slice_type in [self.tr("垂直切片"), self.tr("水平切片"),
+                          self.tr("垂直S型曲线"), self.tr("水平S型曲线")] and not is_linear:
             self.position_combo.setEnabled(True)
         else:
             self.position_combo.setEnabled(False)
+
+    def refresh_linear_labels(self):
+        """根据开关状态高亮右侧对应的选项文字"""
+        palette = self.palette()
+        highlight = palette.color(QPalette.Highlight).name()
+        normal = palette.color(QPalette.WindowText).name()
+        disabled = palette.color(QPalette.Disabled, QPalette.WindowText).name()
+
+        if not self.linear_switch.isEnabled():
+            self.linear_top_label.setStyleSheet(f"color: {disabled}; font-weight: normal;")
+            self.linear_bottom_label.setStyleSheet(f"color: {disabled}; font-weight: normal;")
+            return
+
+        if self.linear_switch.isChecked():
+            self.linear_top_label.setStyleSheet(f"color: {normal}; font-weight: normal;")
+            self.linear_bottom_label.setStyleSheet(f"color: {highlight}; font-weight: bold;")
+        else:
+            self.linear_top_label.setStyleSheet(f"color: {highlight}; font-weight: bold;")
+            self.linear_bottom_label.setStyleSheet(f"color: {normal}; font-weight: normal;")
 
     def select_input_dir(self):
         """选择输入目录"""
@@ -848,7 +1026,7 @@ class TimesliceGUI(QMainWindow):
             'output_dir': output_dir,
             'slice_type': slice_type,
             'position': position,
-            'linear': self.linear_check.isChecked(),
+            'linear': self.linear_switch.isChecked(),
             'reverse': self.reverse_check.isChecked(),
             'sort_by': sort_by,
             'output_basename': self.basename_edit.text().strip() or "timeslice",
