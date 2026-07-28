@@ -4,104 +4,49 @@ import numpy as np
 
 def create_vertical_s_slice(images, position="center", linear=False, progress_callback=None):
     """
-    创建垂直S型曲线时间切片 - 完美S形无缝拼接
+    创建垂直 S 型曲线时间切片（无缝、无黑缝）。
 
-    linear=False（同一位置）：每张照片都从同一个固定位置（由 position 决定：left/center/right）裁切后拼接，
-        即所有照片取同一位置。
-    linear=True（不同位置）：每张照片从其自身对应的竖向条带位置裁切后拼接，
-        保留经典时间切片的 S 形过渡（取不同位置）。
+    linear=False（同一位置）：各照片按直线竖向条带拼接（等价于普通垂直切片）。
+    linear=True（不同位置）：相邻照片之间以 S 形曲线分隔，形成经典 S 型过渡。
+
+    算法：用 n 条等距 S 形分隔线将整图在水平方向划分为 n 个区域，
+    第 i 个区域填充第 i 张照片。相邻区域共用同一条分隔线 -> 精确拼接、零缝隙。
     """
     img_w, img_h = images[0].size
-    num_images = len(images)
+    n = len(images)
     result = Image.new('RGB', (img_w, img_h))
-    if num_images == 0:
+    if n == 0:
         return result
-    strip_width = img_w / num_images
+    if n == 1:
+        result.paste(images[0], (0, 0))
+        if progress_callback:
+            progress_callback(1)
+        return result
 
-    for i, img in enumerate(images):
-        # 当前条带的目标位置（结果图中固定占用的竖向区域，保证无缝覆盖）
-        x0 = i * strip_width
-        x1 = (i + 1) * strip_width
-        half = strip_width / 2
+    strip_w = img_w / n
+    # S 形摆幅：必须小于半条带宽，确保相邻分隔线不交叉（否则会重叠/错位）
+    amp = strip_w * 0.45 if linear else 0.0
 
-        # 线性模式（不同位置）：每张照片从其自身对应的竖向条带位置裁切（经典 S 型时间切片）
-        # 非线性的同一位置模式：所有照片都从同一个固定位置（由 position 决定）裁切
-        if linear:
-            src_center_x = x0 + half
-        else:
-            if position == "left":
-                src_center_x = half
-            elif position == "right":
-                src_center_x = img_w - half
-            elif position == "center":
-                src_center_x = img_w / 2
-            else:
-                try:
-                    pos = float(position)
-                    src_center_x = (img_w - strip_width) * pos + half
-                except (ValueError, TypeError):
-                    src_center_x = img_w / 2
+    ys = np.linspace(0, img_h, 200)
 
-        # 创建蒙版 - 几何固定在当前条带内，保证结果图无缝覆盖
+    def seam(k, yv):
+        if k <= 0:
+            return np.zeros_like(yv)
+        if k >= n:
+            return np.full_like(yv, float(img_w))
+        base = (k / n) * img_w
+        return base + amp * np.sin(np.pi * (yv / img_h - 0.5))
+
+    for i in range(n):
+        # 两侧各向相邻条带重叠 1 像素：各条带区间在数学上连续覆盖整图，
+        # 彻底消除接缝处光栅化可能产生的亚像素黑缝（后续条带会覆盖重叠区，视觉无偏移）
+        left = seam(i, ys) - 1.0
+        right = seam(i + 1, ys) + 1.0
+        pts = [(float(left[j]), float(ys[j])) for j in range(len(ys))]
+        pts += [(float(right[len(ys) - 1 - j]), float(ys[len(ys) - 1 - j])) for j in range(len(ys))]
         mask = Image.new('L', (img_w, img_h), 0)
-        draw = ImageDraw.Draw(mask)
-
-        # 蒙版 S 形控制点 - 以目标条带中心为基准
-        dst_center = x0 + half
-        start_point = (dst_center, 0)
-        control1 = (dst_center - half, img_h / 3)
-        control2 = (dst_center + half, 2 * img_h / 3)
-        end_point = (dst_center, img_h)
-
-        # 计算曲线路径点
-        points = []
-        t_values = np.linspace(0, 1, 200)
-        for t in t_values:
-            x = (1 - t) ** 3 * start_point[0] + 3 * (1 - t) ** 2 * t * control1[0] + 3 * (1 - t) * t ** 2 * control2[0] + t ** 3 * end_point[0]
-            y = (1 - t) ** 3 * start_point[1] + 3 * (1 - t) ** 2 * t * control1[1] + 3 * (1 - t) * t ** 2 * control2[1] + t ** 3 * end_point[1]
-            points.append((x, y))
-
-        # 创建S形路径
-        path_points = []
-
-        # 上边沿线 - 完全匹配S形
-        for x, y in points:
-            path_points.append((x + half, y))
-
-        # 下边沿线 - 反向顺序保持连续性
-        for x, y in reversed(points):
-            path_points.append((x - half, y))
-
-        # 闭合路径
-        if path_points:
-            path_points.append(path_points[0])
-
-        # 填充S形路径 - 这将创建完美的S形蒙版
-        if path_points:
-            draw.polygon(path_points, fill=255)
-
-        # 处理边界情况 - 对于第一张和最后一张图片
-        if i == 0:
-            # 左侧填充
-            draw.polygon([(0, 0), (x0, 0), (x0, img_h), (0, img_h)], fill=255)
-        elif i == num_images - 1:
-            # 右侧填充
-            draw.polygon([(x1, 0), (img_w, 0), (img_w, img_h), (x1, img_h)], fill=255)
-
-        # 从源图以 src_center_x 为中心裁切条带区域，再平移到结果图的当前条带
-        src_x0 = max(0, int(round(src_center_x - half)))
-        src_x1 = min(img_w, int(round(src_center_x + half)))
-        if src_x1 <= src_x0:
-            src_x0 = max(0, src_x1 - 1)
-        src_region = img.crop((src_x0, 0, src_x1, img_h))
-        target_w = int(round(x1 - x0))
-        if src_region.width != target_w:
-            src_region = src_region.resize((target_w, img_h))
-
-        # 将处理好的S形部分粘贴到结果图的当前条带
-        band_mask = mask.crop((int(round(x0)), 0, int(round(x1)), img_h))
-        result.paste(src_region, (int(round(x0)), 0), band_mask)
-
+        ImageDraw.Draw(mask).polygon(pts, fill=255)
+        result.paste(images[i], (0, 0), mask)
         if progress_callback:
             progress_callback(i + 1)
 

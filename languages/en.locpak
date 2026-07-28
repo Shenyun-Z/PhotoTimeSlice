@@ -122,5 +122,13 @@
     "矩形环带": "RectangularBand",
     "圆形环带": "CircularBand",
     "垂直S型": "VerticalS",
-    "水平S型": "HorizontalS"
+    "水平S型": "HorizontalS",
+    "无法打开图片": "Cannot open image",
+    "切片类型（必需）": "Slice type (required)",
+    "时间切片照片生成器（Windows版）": "Photo Time Slice Generator (Windows)",
+    "是否打开生成的图片？(y/n)": "Open the generated image? (y/n)",
+    "条带位置：left/center/right/top/bottom 或 0.0-1.0": "Band position: left/center/right/top/bottom or 0.0-1.0",
+    "语言（en/zh_CN）": "Language (en/zh_CN)",
+    "选择输入目录": "Select input directory",
+    "选择输出目录": "Select output directory"
 }
