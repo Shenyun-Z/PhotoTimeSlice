@@ -42,10 +42,8 @@ class Translator:
                     with open(en_file, 'r', encoding='utf-8') as f:
                         self.translations = json.load(f)
                 else:
-                    print(f"警告：找不到语言文件 {lang_file} 和 {en_file}")
                     self.translations = {}
         except Exception as e:
-            print(f"加载翻译文件失败: {e}")
             self.translations = {}
 
     def tr(self, text):

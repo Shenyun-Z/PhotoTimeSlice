@@ -1,14 +1,10 @@
 import os
 import sys
-import logging
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QComboBox, QLineEdit, QCheckBox, QFileDialog, QProgressBar,
                              QGroupBox, QMessageBox, QTextEdit, QMenuBar, QMenu, QAction)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QEvent, QSettings, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QEvent, QSettings
 from PyQt5.QtGui import QPalette, QColor, QFont, QPainter, QMouseEvent
-
-# 配置调试日志（可选）
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 添加当前目录到系统路径
 if getattr(sys, 'frozen', False):
@@ -34,6 +30,7 @@ class LogEvent(QEvent):
 
 class TimesliceWorker(QThread):
     progress_signal = pyqtSignal(int)
+    total_signal = pyqtSignal(int)
     finished_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str)
@@ -50,6 +47,7 @@ class TimesliceWorker(QThread):
                                  self.params['reverse'],
                                  self.params.get('lang', 'en'))
             total_images = len(images)
+            self.total_signal.emit(total_images)
 
             if total_images == 0:
                 raise Exception(self.tr("输入目录中没有找到图片"))
@@ -82,8 +80,8 @@ class TimesliceWorker(QThread):
             self.error_signal.emit(str(e))
 
     def tr(self, text):
-        """翻译方法（线程内）"""
-        translator = Translator()
+        """翻译方法（线程内），使用用户选择的语言"""
+        translator = Translator(self.params.get('lang', 'en'))
         return translator.tr(text)
 
 
@@ -129,6 +127,12 @@ class VerticalModeSwitch(QWidget):
             return
         self._dragging = True
         self._press_pos = event.pos().y()
+        mid = self.height() // 2
+        self.setChecked(event.pos().y() > mid)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if not self._dragging or not self.isEnabled():
+            return
         mid = self.height() // 2
         self.setChecked(event.pos().y() > mid)
 
@@ -181,8 +185,6 @@ class TimesliceGUI(QMainWindow):
         self.translator.load_translations(self.current_lang)
 
         self.app = QApplication.instance()
-        # 移除跟随系统，无需主题检测定时器
-        self.theme_check_timer = QTimer()
 
         # 初始化主题 - 默认使用浅色
         self.current_theme = self.settings.value("theme", "light")
@@ -415,7 +417,6 @@ class TimesliceGUI(QMainWindow):
     def load_theme(self):
         """加载主题设置（默认浅色）"""
         theme = self.current_theme
-        logging.debug(f"加载主题设置：{theme}")
 
         if theme == "dark":
             self.apply_theme_style("dark")
@@ -429,7 +430,6 @@ class TimesliceGUI(QMainWindow):
         """切换主题（仅浅色/深色）"""
         self.current_theme = theme
         self.settings.setValue("theme", theme)
-        logging.debug(f"切换主题到：{theme}")
 
         self.apply_theme_style(theme)
         # 更新菜单选中状态
@@ -788,10 +788,10 @@ class TimesliceGUI(QMainWindow):
 
     def update_filename_preview(self):
         """更新文件名预览（含真实时间戳来源）"""
-        from utils import compute_timestamp
+        from utils import compute_timestamp, sanitize_filename
 
         # 获取当前设置
-        basename = self.basename_edit.text().strip() or "timeslice"
+        basename = sanitize_filename(self.basename_edit.text() or "timeslice")
         extension = self.extension_combo.currentText().lower()
         include_timestamp = self.timestamp_check.isChecked()
         include_slice_type = self.slice_type_check.isChecked()
@@ -1139,27 +1139,16 @@ class TimesliceGUI(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat(self.tr("已处理 %v 张"))
 
-        # 加载图片
-        from utils import load_images
-        try:
-            images = load_images(input_dir, sort_by, self.reverse_check.isChecked(), self.current_lang)
-            self.total_images = len(images)
-            # 目录读取完成后才显示总照片数
-            self.progress_bar.setRange(0, self.total_images)
-            self.progress_bar.setFormat(self.tr("已处理 %v/%m 张"))
-            self.progress_bar.setValue(0)
-
-            if self.total_images == 0:
-                QMessageBox.warning(self, self.tr("警告"), self.tr("输入目录中没有找到图片"))
-                self.process_btn.setEnabled(True)
-                return
-        except Exception as e:
-            self.error_log.append(f"{self.tr('错误:')} {str(e)}")
+        # 快速检查目录是否含图片（仅列举路径，不加载像素，避免主线程卡顿与重复加载，#5）
+        from utils import get_sorted_image_paths
+        if not get_sorted_image_paths(input_dir, sort_by, self.reverse_check.isChecked()):
+            QMessageBox.warning(self, self.tr("警告"), self.tr("输入目录中没有找到图片"))
             self.process_btn.setEnabled(True)
             return
 
-        # 启动线程
+        # 启动工作线程：图片加载与切片处理均在子线程完成（#5）
         self.worker = TimesliceWorker(params)
+        self.worker.total_signal.connect(self.on_total_images)
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.finished_signal.connect(self.process_finished)
         self.worker.error_signal.connect(self.process_error)
@@ -1170,6 +1159,13 @@ class TimesliceGUI(QMainWindow):
         """更新进度"""
         self.progress_bar.setValue(value)
         self.status_bar.showMessage(f"{self.tr('已处理')} {value}/{self.total_images} {self.tr('张图片')}")
+
+    def on_total_images(self, total):
+        """工作线程加载完成后刷新总数与进度条范围（#5）"""
+        self.total_images = total
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setFormat(self.tr("已处理 %v/%m 张"))
+        self.progress_bar.setValue(0)
 
     def log_message(self, message):
         """日志消息"""
@@ -1195,7 +1191,6 @@ class TimesliceGUI(QMainWindow):
 
     def closeEvent(self, event):
         """关闭窗口"""
-        self.theme_check_timer.stop()
         event.accept()
 
 

@@ -9,6 +9,16 @@ from i18n import Translator
 # 判断是否为打包环境
 is_frozen = getattr(sys, 'frozen', False)
 
+# 文件名非法字符（Windows：\ / : * ? " < > | 及控制字符）
+ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
+
+
+def sanitize_filename(name):
+    """过滤文件名中的非法字符，返回安全的基础名称（空时回退为 timeslice）"""
+    name = ILLEGAL_FILENAME_CHARS.sub('_', (name or '').strip())
+    name = name.strip('. ')
+    return name or "timeslice"
+
 
 def get_base_path():
     """获取正确的基础路径（兼容开发环境和打包环境）"""
@@ -75,8 +85,6 @@ def load_images(input_dir, sort_by='name', reverse=False, lang='en'):
 
     # 加载图片
     images = []
-    if not is_frozen:
-        print(f"加载 {len(image_paths)} 张图片...", end="", flush=True)
 
     for path in image_paths:
         if path.suffix.lower() in ['.nef', '.dng', '.cr2', '.cr3', '.arw', '.raf', '.orf', '.rw2']:
@@ -90,12 +98,11 @@ def load_images(input_dir, sort_by='name', reverse=False, lang='en'):
                 raise ImportError(translator.tr("请安装rawpy库以处理RAW格式: pip install rawpy"))
         else:
             try:
-                images.append(Image.open(path))
+                img = Image.open(path)
+                img.load()  # 强制读取像素数据，尽早暴露损坏文件
+                images.append(img)
             except Exception as e:
-                print(f"无法打开图片 {path}: {e}")
-
-    if not is_frozen:
-        print("完成")
+                raise RuntimeError(f"{translator.tr('无法打开图片')} {path}: {e}")
 
     return images
 
@@ -130,11 +137,15 @@ def get_exif_capture_time(path):
     """读取照片 EXIF 拍摄时间，失败返回 None"""
     try:
         with Image.open(path) as img:
-            exif = img._getexif()
+            exif = img.getexif()
             if not exif:
                 return None
-            # DateTimeOriginal / DateTimeDigitized
-            dt_str = exif.get(36867) or exif.get(36868)
+            # Exif 子 IFD：DateTimeOriginal / DateTimeDigitized
+            exif_ifd = exif.get_ifd(0x8769)
+            dt_str = exif_ifd.get(0x9003) or exif_ifd.get(0x9004)
+            if not dt_str:
+                # 兜底：主 IFD 的 DateTime 字段
+                dt_str = exif.get(0x0132)
             if not dt_str:
                 return None
             return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")

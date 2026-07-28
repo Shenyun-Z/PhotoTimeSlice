@@ -1,0 +1,20 @@
+# 构建产物（PyInstaller）
+build/
+dist/
+*.spec
+
+# Python 缓存
+__pycache__/
+*.pyc
+slices/__pycache__/
+
+# IDE
+.idea/
+
+# 示例照片（用户数据，不入库）
+photos/
+
+# 虚拟环境
+venv/
+.venv/
+env/

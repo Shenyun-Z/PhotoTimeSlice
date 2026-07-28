@@ -1,26 +1,24 @@
 from PIL import Image, ImageDraw
-import sys
-
-# 检查是否为打包环境
-is_frozen = getattr(sys, 'frozen', False)
-
 import math
 
-def create_rectangular_band_slice(images):
+
+def create_rectangular_band_slice(images, progress_callback=None):
     img = images[0]
     img_w, img_h = img.size
     center_x, center_y = img_w // 2, img_h // 2
     num_images = len(images)
-    max_size = max(img_w, img_h)
-    min_size = max_size // 20
     result = Image.new('RGB', (img_w, img_h), (0, 0, 0))
-    size_step = (max_size - min_size) / math.sqrt(num_images)
+    if num_images == 0:
+        return result
+    max_size = max(img_w, img_h)
+    min_size = max(1, max_size // 20)
 
-    if not is_frozen:
-        print("生成矩形环带切片...", end="", flush=True)
+    def ring_size(i):
+        # (i+1)/num_images 保证最外圈恰好铺满整图，避免外圈黑边
+        return min_size + (max_size - min_size) * math.sqrt((i + 1) / num_images)
+
     for i in range(num_images):
-        size = min_size + math.sqrt(i) * size_step
-        size = min(size, max_size)
+        size = ring_size(i)
         width = size * (img_w / max_size)
         height = size * (img_h / max_size)
         left = center_x - width // 2
@@ -33,7 +31,7 @@ def create_rectangular_band_slice(images):
         mask_draw.rectangle([left, top, right, bottom], fill=255)
 
         if i > 0:
-            prev_size = min_size + math.sqrt(i - 1) * size_step
+            prev_size = ring_size(i - 1)
             prev_width = prev_size * (img_w / max_size)
             prev_height = prev_size * (img_h / max_size)
             prev_left = center_x - prev_width // 2
@@ -45,6 +43,7 @@ def create_rectangular_band_slice(images):
         masked_img = Image.composite(images[i], result, mask)
         result.paste(masked_img, (0, 0))
 
-    if not is_frozen:
-        print("完成")
+        if progress_callback:
+            progress_callback(i + 1)
+
     return result

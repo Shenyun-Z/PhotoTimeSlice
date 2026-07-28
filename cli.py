@@ -1,11 +1,10 @@
 import argparse
 import sys
 import os
-import traceback
 from pathlib import Path
 from datetime import datetime
 
-from utils import load_images
+from utils import load_images, sanitize_filename
 from slices import (
     create_vertical_slice,
     create_horizontal_slice,
@@ -32,7 +31,7 @@ def get_translator(lang):
 def generate_output_filename(base_name, include_timestamp, include_slice_type, slice_type, extension, timestamp_str=None, lang='en'):
     """生成输出文件名（切片类型名称随语言切换）"""
     translator = get_translator(lang)
-    parts = [base_name]
+    parts = [sanitize_filename(base_name)]
 
     if include_timestamp:
         timestamp = timestamp_str if timestamp_str else datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -106,6 +105,15 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
 
     output_path = Path(output_dir) / output_filename
 
+    # 避免同名文件被静默覆盖（#9）
+    if output_path.exists():
+        stem = output_path.stem
+        suffix = output_path.suffix
+        counter = 1
+        while output_path.exists():
+            output_path = Path(output_dir) / f"{stem}_{counter}{suffix}"
+            counter += 1
+
     # 加载图片
     try:
         images = load_images(input_dir, sort_by, reverse)
@@ -130,23 +138,23 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
     result = None
     try:
         if slice_type == "vertical":
-            result = create_vertical_slice(images, position, linear)
+            result = create_vertical_slice(images, position, linear, progress_callback=progress_callback)
         elif slice_type == "horizontal":
-            result = create_horizontal_slice(images, position, linear)
+            result = create_horizontal_slice(images, position, linear, progress_callback=progress_callback)
         elif slice_type == "circular_sector":
-            result = create_circular_sector_slice(images, linear)
+            result = create_circular_sector_slice(images, linear, progress_callback=progress_callback)
         elif slice_type == "elliptical_sector":
-            result = create_elliptical_sector_slice(images, linear)
+            result = create_elliptical_sector_slice(images, linear, progress_callback=progress_callback)
         elif slice_type == "elliptical_band":
-            result = create_elliptical_band_slice(images)
+            result = create_elliptical_band_slice(images, progress_callback=progress_callback)
         elif slice_type == "rectangular_band":
-            result = create_rectangular_band_slice(images)
+            result = create_rectangular_band_slice(images, progress_callback=progress_callback)
         elif slice_type == "circular_band":
-            result = create_circular_band_slice(images)
+            result = create_circular_band_slice(images, progress_callback=progress_callback)
         elif slice_type == "vertical_s":
-            result = create_vertical_s_slice(images, position, linear)
+            result = create_vertical_s_slice(images, position, linear, progress_callback=progress_callback)
         elif slice_type == "horizontal_s":
-            result = create_horizontal_s_slice(images, position, linear)
+            result = create_horizontal_s_slice(images, position, linear, progress_callback=progress_callback)
         else:
             raise ValueError(f"{translator.tr('未知切片类型:')} {slice_type}")
 
@@ -304,8 +312,6 @@ def main():
 
     except Exception as e:
         print(f"{translator.tr('错误:')} {str(e)}", file=sys.stderr)
-        if not is_frozen:
-            traceback.print_exc()
         sys.exit(1)
 
 

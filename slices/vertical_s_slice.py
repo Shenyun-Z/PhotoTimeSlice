@@ -1,12 +1,8 @@
 from PIL import Image, ImageDraw
-import sys
-
-# 检查是否为打包环境
-is_frozen = getattr(sys, 'frozen', False)
-
 import numpy as np
 
-def create_vertical_s_slice(images, position="center", linear=False):
+
+def create_vertical_s_slice(images, position="center", linear=False, progress_callback=None):
     """
     创建垂直S型曲线时间切片 - 完美S形无缝拼接
 
@@ -18,10 +14,10 @@ def create_vertical_s_slice(images, position="center", linear=False):
     img_w, img_h = images[0].size
     num_images = len(images)
     result = Image.new('RGB', (img_w, img_h))
+    if num_images == 0:
+        return result
     strip_width = img_w / num_images
 
-    if not is_frozen:
-        print("生成垂直S型曲线切片...", end="", flush=True)
     for i, img in enumerate(images):
         # 当前条带的目标位置（结果图中固定占用的竖向区域，保证无缝覆盖）
         x0 = i * strip_width
@@ -59,13 +55,10 @@ def create_vertical_s_slice(images, position="center", linear=False):
 
         # 计算曲线路径点
         points = []
-        t_values = np.linspace(0, 1, 200)  # 增加采样点
+        t_values = np.linspace(0, 1, 200)
         for t in t_values:
-            # 贝塞尔曲线公式
-            x = (1 - t) ** 3 * start_point[0] + 3 * (1 - t) ** 2 * t * control1[0] + 3 * (1 - t) * t ** 2 * control2[
-                0] + t ** 3 * end_point[0]
-            y = (1 - t) ** 3 * start_point[1] + 3 * (1 - t) ** 2 * t * control1[1] + 3 * (1 - t) * t ** 2 * control2[
-                1] + t ** 3 * end_point[1]
+            x = (1 - t) ** 3 * start_point[0] + 3 * (1 - t) ** 2 * t * control1[0] + 3 * (1 - t) * t ** 2 * control2[0] + t ** 3 * end_point[0]
+            y = (1 - t) ** 3 * start_point[1] + 3 * (1 - t) ** 2 * t * control1[1] + 3 * (1 - t) * t ** 2 * control2[1] + t ** 3 * end_point[1]
             points.append((x, y))
 
         # 创建S形路径
@@ -73,12 +66,10 @@ def create_vertical_s_slice(images, position="center", linear=False):
 
         # 上边沿线 - 完全匹配S形
         for x, y in points:
-            # 向外扩展一半条带宽度
             path_points.append((x + half, y))
 
         # 下边沿线 - 反向顺序保持连续性
         for x, y in reversed(points):
-            # 向内收缩一半条带宽度
             path_points.append((x - half, y))
 
         # 闭合路径
@@ -111,6 +102,7 @@ def create_vertical_s_slice(images, position="center", linear=False):
         band_mask = mask.crop((int(round(x0)), 0, int(round(x1)), img_h))
         result.paste(src_region, (int(round(x0)), 0), band_mask)
 
-    if not is_frozen:
-        print("完成")
+        if progress_callback:
+            progress_callback(i + 1)
+
     return result
