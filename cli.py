@@ -114,9 +114,9 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
             output_path = Path(output_dir) / f"{stem}_{counter}{suffix}"
             counter += 1
 
-    # 加载图片
+    # 加载图片（使用用户语言报错，#2）
     try:
-        images = load_images(input_dir, sort_by, reverse)
+        images = load_images(input_dir, sort_by, reverse, lang)
     except Exception as e:
         raise Exception(f"{translator.tr('加载图片失败:')} {str(e)}")
 

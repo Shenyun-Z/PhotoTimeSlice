@@ -12,11 +12,22 @@ is_frozen = getattr(sys, 'frozen', False)
 # 文件名非法字符（Windows：\ / : * ? " < > | 及控制字符）
 ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
 
+# Windows 保留设备名，单独作为文件名时保存会失败（#3）
+WINDOWS_RESERVED_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+}
+
 
 def sanitize_filename(name):
     """过滤文件名中的非法字符，返回安全的基础名称（空时回退为 timeslice）"""
     name = ILLEGAL_FILENAME_CHARS.sub('_', (name or '').strip())
     name = name.strip('. ')
+    # 过滤 Windows 保留设备名（如 CON/PRN/AUX/NUL/COM1/LPT1 等），避免保存失败（#3）
+    stem = name.split('.', 1)[0] if name else ''
+    if stem.upper() in WINDOWS_RESERVED_NAMES:
+        name = f"{name}_"
     return name or "timeslice"
 
 

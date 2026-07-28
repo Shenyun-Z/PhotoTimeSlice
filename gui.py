@@ -41,12 +41,13 @@ class TimesliceWorker(QThread):
 
     def run(self):
         try:
-            from utils import load_images
-            images = load_images(self.params['input_dir'],
-                                 self.params['sort_by'],
-                                 self.params['reverse'],
-                                 self.params.get('lang', 'en'))
-            total_images = len(images)
+            from utils import get_sorted_image_paths
+            # 仅列举路径统计总数，不加载像素；加载交由 run_timeslice 单次完成（#1）
+            image_paths = get_sorted_image_paths(
+                self.params['input_dir'],
+                self.params['sort_by'],
+                self.params['reverse'])
+            total_images = len(image_paths)
             self.total_signal.emit(total_images)
 
             if total_images == 0:
@@ -1190,7 +1191,13 @@ class TimesliceGUI(QMainWindow):
                 self.error_log.append(f"{self.tr('无法打开图片:')} {str(e)}")
 
     def closeEvent(self, event):
-        """关闭窗口"""
+        """关闭窗口前先终止工作线程，避免后台继续写文件/占资源（#4）"""
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.quit()
+            self.worker.wait(3000)
+            if self.worker.isRunning():
+                self.worker.terminate()
+                self.worker.wait(2000)
         event.accept()
 
 
