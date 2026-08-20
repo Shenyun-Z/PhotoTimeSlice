@@ -130,5 +130,17 @@
     "条带位置：left/center/right/top/bottom 或 0.0-1.0": "Band position: left/center/right/top/bottom or 0.0-1.0",
     "语言（en/zh_CN）": "Language (en/zh_CN)",
     "选择输入目录": "Select input directory",
-    "选择输出目录": "Select output directory"
+    "选择输出目录": "Select output directory",
+    "尺寸适配:": "Size fit:",
+    "缩放居中补边": "Scale & pad",
+    "居中裁切": "Center crop",
+    "拉伸铺满": "Stretch",
+    "不自动适配": "No auto-fit",
+    "图片尺寸不一致时的处理方式（以第一张图为基准）": "How to handle mismatched image sizes (based on the first image)",
+    "实时预览": "Live Preview",
+    "选择输入目录后自动预览": "Select an input directory to preview",
+    "正在生成预览...": "Generating preview...",
+    "实时预览（使用前 8 张图片）": "Live preview (using first 8 images)",
+    "预览失败": "Preview failed",
+    "适配图片失败:": "Failed to fit image:"
 }

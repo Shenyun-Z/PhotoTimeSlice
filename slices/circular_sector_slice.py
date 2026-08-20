@@ -1,18 +1,20 @@
 from PIL import Image, ImageDraw
 
+from ._common import iter_with_count
 
-def create_circular_sector_slice(images, linear=False, progress_callback=None):
-    img = images[0]
-    img_w, img_h = img.size
+
+def create_circular_sector_slice(images, linear=False, progress_callback=None, num_images=None):
+    """圆形 360° 等分扇形切片。images 可为列表或生成器（流式）。"""
+    it, num_images, first = iter_with_count(images, num_images)
+    if num_images == 0:
+        return Image.new('RGB', (1, 1))
+    img_w, img_h = first.size
     center_x, center_y = img_w // 2, img_h // 2
     radius = min(center_x, center_y)
-    num_images = len(images)
     result = Image.new('RGB', (img_w, img_h), (0, 0, 0))
-    if num_images == 0:
-        return result
     angle_step = 360 / num_images
 
-    for i, src_img in enumerate(images):
+    for i, src_img in enumerate(it):
         start_angle = i * angle_step
         end_angle = (i + 1) * angle_step
         if not linear:

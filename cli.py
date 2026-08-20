@@ -1,10 +1,8 @@
-import argparse
-import sys
 import os
 from pathlib import Path
 from datetime import datetime
 
-from utils import load_images, sanitize_filename
+from utils import iter_images, get_sorted_image_paths, sanitize_filename, FIT_SCALE_CENTER
 from slices import (
     create_vertical_slice,
     create_horizontal_slice,
@@ -17,9 +15,6 @@ from slices import (
     create_horizontal_s_slice
 )
 from i18n import Translator
-
-# Windows可执行文件判断
-is_frozen = getattr(sys, 'frozen', False)
 
 
 def get_translator(lang):
@@ -66,8 +61,18 @@ def generate_output_filename(base_name, include_timestamp, include_slice_type, s
 def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=False, reverse=False,
                   sort_by='name', output_basename='timeslice', include_timestamp=False,
                   include_slice_type=False, extension='jpg', progress_callback=None,
-                  lang='en', timestamp_source='composition'):
-    """生成时间切片（仅Windows）"""
+                  lang='en', timestamp_source='composition',
+                  fit_strategy=FIT_SCALE_CENTER, fill_color=(0, 0, 0)):
+    """
+    生成时间切片（纯 API 核心调度）。
+
+    采用流式加载：逐张读取、适配并释放图片，避免一次性将所有图片载入内存。
+    尺寸适配策略由 fit_strategy 指定（见 utils.FIT_* 常量）：
+      - scale_center：缩放居中补边（默认）
+      - crop_center ：缩放后居中裁切
+      - stretch     ：拉伸铺满
+      - none        ：尺寸不一致时报错
+    """
     translator = get_translator(lang)
 
     # 确保输入目录存在
@@ -114,47 +119,44 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
             output_path = Path(output_dir) / f"{stem}_{counter}{suffix}"
             counter += 1
 
-    # 加载图片（使用用户语言报错，#2）
+    # 先取图片路径列表以确定总数（不加载像素），供流式切片使用
     try:
-        images = load_images(input_dir, sort_by, reverse, lang)
+        image_paths = get_sorted_image_paths(input_dir, sort_by, reverse)
     except Exception as e:
         raise Exception(f"{translator.tr('加载图片失败:')} {str(e)}")
 
-    if not images:
+    if not image_paths:
         raise Exception(translator.tr("输入目录中没有找到图片"))
 
-    # 检查尺寸
-    base_size = images[0].size
-    for img in images:
-        if img.size != base_size:
-            raise Exception(translator.tr("所有图片必须具有相同的尺寸"))
+    num_images = len(image_paths)
 
     # 进度回调
     if progress_callback:
         progress_callback(0)
 
-    # 在 run_timeslice 函数中修改切片生成部分
-    # 生成切片
+    # 生成切片（流式：逐张加载、适配、处理、释放）
     result = None
     try:
+        image_iter = iter_images(input_dir, sort_by, reverse, fit_strategy, fill_color, lang)
+
         if slice_type == "vertical":
-            result = create_vertical_slice(images, position, linear, progress_callback=progress_callback)
+            result = create_vertical_slice(image_iter, position, linear, progress_callback=progress_callback, num_images=num_images)
         elif slice_type == "horizontal":
-            result = create_horizontal_slice(images, position, linear, progress_callback=progress_callback)
+            result = create_horizontal_slice(image_iter, position, linear, progress_callback=progress_callback, num_images=num_images)
         elif slice_type == "circular_sector":
-            result = create_circular_sector_slice(images, linear, progress_callback=progress_callback)
+            result = create_circular_sector_slice(image_iter, linear, progress_callback=progress_callback, num_images=num_images)
         elif slice_type == "elliptical_sector":
-            result = create_elliptical_sector_slice(images, linear, progress_callback=progress_callback)
+            result = create_elliptical_sector_slice(image_iter, linear, progress_callback=progress_callback, num_images=num_images)
         elif slice_type == "elliptical_band":
-            result = create_elliptical_band_slice(images, progress_callback=progress_callback)
+            result = create_elliptical_band_slice(image_iter, progress_callback=progress_callback, num_images=num_images)
         elif slice_type == "rectangular_band":
-            result = create_rectangular_band_slice(images, progress_callback=progress_callback)
+            result = create_rectangular_band_slice(image_iter, progress_callback=progress_callback, num_images=num_images)
         elif slice_type == "circular_band":
-            result = create_circular_band_slice(images, progress_callback=progress_callback)
+            result = create_circular_band_slice(image_iter, progress_callback=progress_callback, num_images=num_images)
         elif slice_type == "vertical_s":
-            result = create_vertical_s_slice(images, position, linear, progress_callback=progress_callback)
+            result = create_vertical_s_slice(image_iter, position, linear, progress_callback=progress_callback, num_images=num_images)
         elif slice_type == "horizontal_s":
-            result = create_horizontal_s_slice(images, position, linear, progress_callback=progress_callback)
+            result = create_horizontal_s_slice(image_iter, position, linear, progress_callback=progress_callback, num_images=num_images)
         else:
             raise ValueError(f"{translator.tr('未知切片类型:')} {slice_type}")
 
@@ -166,7 +168,7 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
         # 添加详细错误信息
         import traceback
         error_details = traceback.format_exc()
-        raise Exception(f"{translator.tr('生成切片失败:')}\n{str(e)}\n{error_details}")  # 修改这里
+        raise Exception(f"{translator.tr('生成切片失败:')}\n{str(e)}\n{error_details}")
 
     # 保存图片
     try:
@@ -184,136 +186,3 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
         raise Exception(f"{translator.tr('保存图片失败:')} {str(e)}")
 
     return str(output_path)
-
-
-def main():
-    """CLI主函数（仅Windows）"""
-    default_translator = get_translator('en')
-
-    # 参数解析
-    parser = argparse.ArgumentParser(
-        description=default_translator.tr("时间切片照片生成器（Windows版）"),
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-
-    parser.add_argument(
-        "-i", "--input",
-        default="input",
-        help=default_translator.tr("输入文件夹路径（默认为\"input\"）")
-    )
-    parser.add_argument(
-        "-o", "--output",
-        default="output",
-        help=default_translator.tr("输出文件夹路径（默认为\"output\"）")
-    )
-    parser.add_argument(
-        "-t", "--type",
-        required=True,
-        choices=["vertical", "horizontal", "circular_sector",
-                 "elliptical_sector", "elliptical_band",
-                 "rectangular_band", "circular_band",
-                 "vertical_s", "horizontal_s"],
-        help=default_translator.tr("切片类型（必需）")
-    )
-    parser.add_argument(
-        "-p", "--position",
-        default="center",
-        help=default_translator.tr("条带位置：left/center/right/top/bottom 或 0.0-1.0")
-    )
-    parser.add_argument(
-        "-l", "--linear",
-        action="store_true",
-        help=default_translator.tr("启用线性模式（作用因切片类型而异，详见 README）")
-    )
-    parser.add_argument(
-        "-r", "--reverse",
-        action="store_true",
-        help=default_translator.tr("逆序排序")
-    )
-    parser.add_argument(
-        "--sort-by",
-        default="name",
-        choices=["name", "created_time", "modified_time"],
-        help=default_translator.tr("排序方式：name/created_time/modified_time")
-    )
-    parser.add_argument(
-        "--output-name",
-        default="timeslice",
-        help=default_translator.tr("输出文件基础名称")
-    )
-    parser.add_argument(
-        "--include-timestamp",
-        action="store_true",
-        help=default_translator.tr("在文件名中包含时间戳")
-    )
-    parser.add_argument(
-        "--timestamp-source",
-        default="composition",
-        choices=["composition", "first_capture", "last_capture", "first_modified", "last_modified"],
-        help=default_translator.tr("时间戳来源：composition/first_capture/last_capture/first_modified/last_modified")
-    )
-    parser.add_argument(
-        "--include-slice-type",
-        action="store_true",
-        help=default_translator.tr("在文件名中包含切片类型")
-    )
-    parser.add_argument(
-        "--extension",
-        default="jpg",
-        choices=["jpg", "jpeg", "png", "webp"],
-        help=default_translator.tr("输出文件扩展名")
-    )
-    parser.add_argument(
-        "-lang", "--language",
-        default="en",
-        choices=["en", "zh_CN"],
-        help=default_translator.tr("语言（en/zh_CN）")
-    )
-
-    args = parser.parse_args()
-    translator = get_translator(args.language)
-
-    try:
-        # 生成切片
-        output_path = run_timeslice(
-            input_dir=args.input,
-            output_dir=args.output,
-            slice_type=args.type,
-            position=args.position,
-            linear=args.linear,
-            reverse=args.reverse,
-            sort_by=args.sort_by,
-            output_basename=args.output_name,
-            include_timestamp=args.include_timestamp,
-            include_slice_type=args.include_slice_type,
-            extension=args.extension,
-            lang=args.language,
-            timestamp_source=args.timestamp_source
-        )
-
-        # 输出结果
-        print(translator.tr('处理完成!'))
-        print(f"{translator.tr('时间切片已保存至:')} {output_path}")
-
-        # Windows自动打开（可选）
-        if is_frozen:
-            # 在打包环境中，跳过交互式提示
-            try:
-                os.startfile(output_path)
-            except:
-                pass
-        else:
-            response = input(f"{translator.tr('是否打开生成的图片？(y/n)')} ")
-            if response.lower() == 'y':
-                try:
-                    os.startfile(output_path)
-                except:
-                    print(f"{translator.tr('无法打开图片:')} {output_path}")
-
-    except Exception as e:
-        print(f"{translator.tr('错误:')} {str(e)}", file=sys.stderr)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

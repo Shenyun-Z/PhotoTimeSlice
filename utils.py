@@ -60,70 +60,135 @@ def get_file_modification_time(path):
     return os.path.getmtime(path)
 
 
-def load_images(input_dir, sort_by='name', reverse=False, lang='en'):
-    """加载Windows目录中的图片，支持多种排序方式"""
+# 支持的图片格式（glob 通配）
+IMAGE_EXTENSIONS = [
+    "*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
+    "*.nef", "*.dng", "*.cr2", "*.cr3", "*.arw", "*.raf", "*.orf", "*.rw2"
+]
+
+# RAW 格式后缀（需 rawpy 支持）
+RAW_SUFFIXES = {'.nef', '.dng', '.cr2', '.cr3', '.arw', '.raf', '.orf', '.rw2'}
+
+# 尺寸适配策略
+FIT_SCALE_CENTER = 'scale_center'   # 保持比例缩放 + 居中补边（默认）
+FIT_CROP_CENTER = 'crop_center'     # 保持比例缩放 + 居中裁切
+FIT_STRETCH = 'stretch'             # 拉伸铺满
+FIT_NONE = 'none'                   # 不自动适配（尺寸必须一致，否则报错）
+FIT_STRATEGIES = (FIT_SCALE_CENTER, FIT_CROP_CENTER, FIT_STRETCH, FIT_NONE)
+
+
+def open_image_single(path, lang='en'):
+    """打开单张图片（支持 RAW），返回 PIL.Image；失败抛出明确异常"""
     translator = Translator(lang)
-    # 确保输入目录存在
+    path = Path(path)
+    if path.suffix.lower() in RAW_SUFFIXES:
+        try:
+            import rawpy
+            with rawpy.imread(str(path)) as raw:
+                rgb = raw.postprocess()
+            return Image.fromarray(rgb)
+        except ImportError:
+            raise ImportError(translator.tr("请安装rawpy库以处理RAW格式: pip install rawpy"))
+    try:
+        img = Image.open(path)
+        img.load()  # 强制读取像素数据，尽早暴露损坏文件
+        return img
+    except Exception as e:
+        raise RuntimeError(f"{translator.tr('无法打开图片')} {path}: {e}")
+
+
+def fit_image(img, target_size, strategy=FIT_SCALE_CENTER, fill_color=(0, 0, 0)):
+    """
+    将图片适配到目标尺寸。
+
+    策略：
+      scale_center：保持宽高比缩放并居中，剩余区域填充 fill_color（不失真、不损失内容）
+      crop_center ：保持宽高比缩放后居中裁切，覆盖目标尺寸（不失真、损失边缘内容）
+      stretch     ：直接拉伸到目标尺寸（可能变形）
+      none        ：尺寸不同时抛出 ValueError（严格一致模式）
+    """
+    if img.size == target_size:
+        return img
+
+    tw, th = target_size
+    iw, ih = img.size
+    if iw <= 0 or ih <= 0:
+        raise ValueError(f"非法图片尺寸: {img.size}")
+
+    if strategy == FIT_STRETCH:
+        return img.resize((tw, th), Image.LANCZOS)
+
+    if strategy == FIT_CROP_CENTER:
+        scale = max(tw / iw, th / ih)
+        nw, nh = int(round(iw * scale)), int(round(ih * scale))
+        scaled = img.resize((nw, nh), Image.LANCZOS)
+        left = max(0, (nw - tw) // 2)
+        top = max(0, (nh - th) // 2)
+        return scaled.crop((left, top, left + tw, top + th))
+
+    if strategy == FIT_SCALE_CENTER:
+        scale = min(tw / iw, th / ih)
+        nw, nh = int(round(iw * scale)), int(round(ih * scale))
+        scaled = img.resize((nw, nh), Image.LANCZOS)
+        canvas = Image.new('RGB', target_size, fill_color)
+        canvas.paste(scaled, ((tw - nw) // 2, (th - nh) // 2))
+        return canvas
+
+    if strategy == FIT_NONE:
+        raise ValueError(f"图片尺寸 {img.size} 与基准 {target_size} 不一致，且未启用自动适配")
+
+    raise ValueError(f"未知适配策略: {strategy}")
+
+
+def iter_images(input_dir, sort_by='name', reverse=False, fit_strategy=FIT_SCALE_CENTER,
+                fill_color=(0, 0, 0), lang='en'):
+    """
+    流式加载并适配图片（生成器）。
+
+    以第一张图片为基准尺寸，后续图片按 fit_strategy 自动适配。
+    逐张打开 / 处理 / 释放，避免一次性将所有图片载入内存。
+    """
+    translator = Translator(lang)
     if not os.path.exists(input_dir):
         raise FileNotFoundError(f"{translator.tr('输入目录不存在:')} {input_dir}")
 
-    # 支持的图片格式
-    image_extensions = [
-        "*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
-        "*.nef", "*.dng", "*.cr2", "*.cr3", "*.arw", "*.raf", "*.orf", "*.rw2"
-    ]
-
-    # 遍历目录
-    image_paths = []
-    for ext in image_extensions:
-        image_paths.extend(Path(input_dir).glob(ext))
-
-    if not image_paths:
+    paths = get_sorted_image_paths(input_dir, sort_by, reverse)
+    if not paths:
         raise FileNotFoundError(f"{translator.tr('在目录中未找到支持的图片文件')} {input_dir}")
 
-    # 根据排序规则排序
-    if sort_by == 'name':
-        image_paths.sort(key=natural_sort_key)
-    elif sort_by == 'created_time':
-        image_paths.sort(key=get_file_creation_time)
-    elif sort_by == 'modified_time':
-        image_paths.sort(key=get_file_modification_time)
-    else:
-        image_paths.sort(key=natural_sort_key)  # 默认按名称
-
-    if reverse:
-        image_paths = list(reversed(image_paths))
-
-    # 加载图片
-    images = []
-
-    for path in image_paths:
-        if path.suffix.lower() in ['.nef', '.dng', '.cr2', '.cr3', '.arw', '.raf', '.orf', '.rw2']:
-            try:
-                import rawpy
-                with rawpy.imread(str(path)) as raw:
-                    rgb = raw.postprocess()
-                img = Image.fromarray(rgb)
-                images.append(img)
-            except ImportError:
-                raise ImportError(translator.tr("请安装rawpy库以处理RAW格式: pip install rawpy"))
+    base_size = None
+    for i, path in enumerate(paths):
+        img = open_image_single(path, lang)
+        if base_size is None:
+            base_size = img.size
         else:
             try:
-                img = Image.open(path)
-                img.load()  # 强制读取像素数据，尽早暴露损坏文件
-                images.append(img)
+                img = fit_image(img, base_size, fit_strategy, fill_color)
             except Exception as e:
-                raise RuntimeError(f"{translator.tr('无法打开图片')} {path}: {e}")
+                img.close()
+                raise RuntimeError(f"{translator.tr('适配图片失败:')} {path}: {e}")
+        yield img
 
+
+def load_images(input_dir, sort_by='name', reverse=False, lang='en'):
+    """加载目录中的全部图片到列表（一次性载入，兼容性接口；大目录请使用 iter_images）"""
+    translator = Translator(lang)
+    if not os.path.exists(input_dir):
+        raise FileNotFoundError(f"{translator.tr('输入目录不存在:')} {input_dir}")
+
+    paths = get_sorted_image_paths(input_dir, sort_by, reverse)
+    if not paths:
+        raise FileNotFoundError(f"{translator.tr('在目录中未找到支持的图片文件')} {input_dir}")
+
+    images = []
+    for path in paths:
+        images.append(open_image_single(path, lang))
     return images
 
 
 def get_sorted_image_paths(input_dir, sort_by='name', reverse=False):
     """返回排序后的图片路径列表（不加载图像，用于时间戳计算）"""
-    image_extensions = [
-        "*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
-        "*.nef", "*.dng", "*.cr2", "*.cr3", "*.arw", "*.raf", "*.orf", "*.rw2"
-    ]
+    image_extensions = list(IMAGE_EXTENSIONS)
 
     image_paths = []
     for ext in image_extensions:

@@ -1,15 +1,18 @@
 from PIL import Image
 
+from ._common import iter_with_count
 
-def create_vertical_slice(images, position, linear=False, progress_callback=None):
-    img_w, img_h = images[0].size
-    num_images = len(images)
-    result = Image.new('RGB', (img_w, img_h))
+
+def create_vertical_slice(images, position, linear=False, progress_callback=None, num_images=None):
+    """垂直条带切片。images 可为列表或生成器（流式），配合 num_images 使用。"""
+    it, num_images, first = iter_with_count(images, num_images)
     if num_images == 0:
-        return result
+        return Image.new('RGB', (1, 1))
+    img_w, img_h = first.size
+    result = Image.new('RGB', (img_w, img_h))
     step = img_w / num_images
 
-    for i, img in enumerate(images):
+    for i, img in enumerate(it):
         x0 = int(round(i * step))
         x1 = int(round((i + 1) * step))
         strip_w = max(1, x1 - x0)

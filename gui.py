@@ -1,10 +1,12 @@
 import os
 import sys
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QComboBox, QLineEdit, QCheckBox, QFileDialog, QProgressBar,
-                             QGroupBox, QMessageBox, QTextEdit, QMenuBar, QMenu, QAction)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QEvent, QSettings
-from PyQt5.QtGui import QPalette, QColor, QFont, QPainter, QMouseEvent
+                             QGroupBox, QMessageBox, QTextEdit, QMenuBar, QMenu)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent, QSettings, QTimer
+from PyQt6.QtGui import QPalette, QColor, QFont, QPainter, QMouseEvent, QPixmap, QAction
+from PIL import Image
+from PIL.ImageQt import toqpixmap
 
 # 添加当前目录到系统路径
 if getattr(sys, 'frozen', False):
@@ -16,6 +18,10 @@ sys.path.insert(0, application_path)
 
 from cli import run_timeslice
 from i18n import Translator  # 导入翻译器
+from utils import (
+    FIT_SCALE_CENTER, FIT_CROP_CENTER, FIT_STRETCH, FIT_NONE,
+    fit_image, get_sorted_image_paths, open_image_single
+)
 
 
 class LogEvent(QEvent):
@@ -72,6 +78,7 @@ class TimesliceWorker(QThread):
                 extension=self.params['extension'],
                 lang=self.params.get('lang', 'en'),
                 timestamp_source=self.params.get('timestamp_source', 'composition'),
+                fit_strategy=self.params.get('fit_strategy', FIT_SCALE_CENTER),
                 progress_callback=progress_callback
             )
 
@@ -86,6 +93,90 @@ class TimesliceWorker(QThread):
         return translator.tr(text)
 
 
+class PreviewWorker(QThread):
+    """实时预览线程：加载少量缩略图并按当前参数快速合成预览图"""
+    preview_ready = pyqtSignal(object, int)  # (QPixmap, request_seq)
+    preview_failed = pyqtSignal(str, int)
+
+    def __init__(self, params, request_seq, parent=None):
+        super().__init__(parent)
+        self.params = params
+        self.request_seq = request_seq
+
+    def run(self):
+        try:
+            from slices import (
+                create_vertical_slice,
+                create_horizontal_slice,
+                create_circular_sector_slice,
+                create_elliptical_sector_slice,
+                create_elliptical_band_slice,
+                create_rectangular_band_slice,
+                create_circular_band_slice,
+                create_vertical_s_slice,
+                create_horizontal_s_slice
+            )
+            input_dir = self.params['input_dir']
+            sort_by = self.params['sort_by']
+            reverse = self.params['reverse']
+            fit_strategy = self.params.get('fit_strategy', FIT_SCALE_CENTER)
+            max_images = self.params.get('max_images', 8)
+            preview_max_side = self.params.get('preview_max_side', 320)
+
+            paths = get_sorted_image_paths(input_dir, sort_by, reverse)
+            paths = paths[:max_images]
+            if not paths:
+                raise Exception("no images")
+
+            # 流式加载缩略图并统一尺寸
+            thumbs = []
+            base_size = None
+            for path in paths:
+                img = open_image_single(path, 'en')
+                img.thumbnail((preview_max_side, preview_max_side), Image.LANCZOS)
+                img = img.convert('RGB')
+                if base_size is None:
+                    base_size = img.size
+                else:
+                    img = fit_image(img, base_size, fit_strategy)
+                thumbs.append(img)
+
+            slice_type = self.params['slice_type']
+            position = self.params.get('position', 'center')
+            linear = self.params.get('linear', False)
+            num_images = len(thumbs)
+
+            if slice_type == "vertical":
+                result = create_vertical_slice(thumbs, position, linear, num_images=num_images)
+            elif slice_type == "horizontal":
+                result = create_horizontal_slice(thumbs, position, linear, num_images=num_images)
+            elif slice_type == "circular_sector":
+                result = create_circular_sector_slice(thumbs, linear, num_images=num_images)
+            elif slice_type == "elliptical_sector":
+                result = create_elliptical_sector_slice(thumbs, linear, num_images=num_images)
+            elif slice_type == "elliptical_band":
+                result = create_elliptical_band_slice(thumbs, num_images=num_images)
+            elif slice_type == "rectangular_band":
+                result = create_rectangular_band_slice(thumbs, num_images=num_images)
+            elif slice_type == "circular_band":
+                result = create_circular_band_slice(thumbs, num_images=num_images)
+            elif slice_type == "vertical_s":
+                result = create_vertical_s_slice(thumbs, position, linear, num_images=num_images)
+            elif slice_type == "horizontal_s":
+                result = create_horizontal_s_slice(thumbs, position, linear, num_images=num_images)
+            else:
+                raise ValueError(f"未知切片类型: {slice_type}")
+
+            if result is None:
+                raise Exception("slice returned None")
+
+            # 转换为 QPixmap（Pillow 官方 toqpixmap，需 PyQt6）
+            pixmap = toqpixmap(result)
+            self.preview_ready.emit(pixmap, self.request_seq)
+        except Exception as e:
+            self.preview_failed.emit(str(e), self.request_seq)
+
+
 class VerticalModeSwitch(QWidget):
     """竖向滑动开关：上下滑动切换两种模式"""
     toggled = pyqtSignal(bool)
@@ -98,7 +189,7 @@ class VerticalModeSwitch(QWidget):
         self._dragging = False
         self._press_pos = 0
         self.setFixedSize(40, 90)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_top_text(self, text):
         self._top_text = text
@@ -142,7 +233,7 @@ class VerticalModeSwitch(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         palette = self.palette()
         w = self.width()
@@ -154,7 +245,7 @@ class VerticalModeSwitch(QWidget):
         # 轨道背景
         track_color = QColor("#e0e0e0") if self.isEnabled() else QColor("#b0b0b0")
         painter.setBrush(track_color)
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(track_x, track_y, track_w, track_h, track_w // 2, track_w // 2)
 
         # 滑块
@@ -166,7 +257,7 @@ class VerticalModeSwitch(QWidget):
         knob_x = track_x + (track_w - knob_d) // 2
 
         if self.isEnabled():
-            knob_color = palette.color(QPalette.Highlight)
+            knob_color = palette.color(QPalette.ColorRole.Highlight)
         else:
             knob_color = QColor("#bdbdbd")
         painter.setBrush(knob_color)
@@ -194,11 +285,19 @@ class TimesliceGUI(QMainWindow):
         self.load_theme()
 
         self.setWindowTitle(self.tr("时间切片照片生成器"))
-        self.setGeometry(100, 100, 800, 650)  # 增加高度以容纳新的UI元素
+        self.setGeometry(100, 100, 860, 760)  # 增加高度以容纳实时预览
 
         self.current_output_path = ""
         self.total_images = 0
         self.worker = None
+
+        # 实时预览相关状态
+        self.preview_worker = None
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(300)  # 防抖：参数连续变化时延迟刷新
+        self._preview_timer.timeout.connect(self._refresh_preview)
+        self._preview_request_seq = 0
 
     def tr(self, text):
         """翻译方法"""
@@ -215,19 +314,19 @@ class TimesliceGUI(QMainWindow):
             light_color = QColor(180, 180, 180)
 
             # 主界面调色板
-            palette.setColor(QPalette.Window, dark_color)
-            palette.setColor(QPalette.WindowText, light_color)
-            palette.setColor(QPalette.Base, QColor(30, 30, 30))
-            palette.setColor(QPalette.AlternateBase, dark_color)
-            palette.setColor(QPalette.ToolTipBase, light_color)
-            palette.setColor(QPalette.ToolTipText, light_color)
-            palette.setColor(QPalette.Text, light_color)
-            palette.setColor(QPalette.Button, dark_color)
-            palette.setColor(QPalette.ButtonText, light_color)
-            palette.setColor(QPalette.BrightText, Qt.red)
-            palette.setColor(QPalette.Link, QColor(42, 130, 218))
-            palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-            palette.setColor(QPalette.HighlightedText, Qt.black)
+            palette.setColor(QPalette.ColorRole.Window, dark_color)
+            palette.setColor(QPalette.ColorRole.WindowText, light_color)
+            palette.setColor(QPalette.ColorRole.Base, QColor(30, 30, 30))
+            palette.setColor(QPalette.ColorRole.AlternateBase, dark_color)
+            palette.setColor(QPalette.ColorRole.ToolTipBase, light_color)
+            palette.setColor(QPalette.ColorRole.ToolTipText, light_color)
+            palette.setColor(QPalette.ColorRole.Text, light_color)
+            palette.setColor(QPalette.ColorRole.Button, dark_color)
+            palette.setColor(QPalette.ColorRole.ButtonText, light_color)
+            palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+            palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+            palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+            palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
 
             # 统一样式表
             menu_style = """
@@ -461,6 +560,7 @@ class TimesliceGUI(QMainWindow):
             'sort_index': self.sort_combo.currentIndex(),
             'extension_index': self.extension_combo.currentIndex(),
             'timestamp_source_index': self.timestamp_source_combo.currentIndex(),
+            'fit_index': self.fit_combo.currentIndex(),
             'linear': self.linear_switch.isChecked(),
             'reverse': self.reverse_check.isChecked(),
             'auto_open': self.auto_open_check.isChecked(),
@@ -481,6 +581,7 @@ class TimesliceGUI(QMainWindow):
 
         self.sort_combo.setCurrentIndex(state['sort_index'])
         self.extension_combo.setCurrentIndex(state['extension_index'])
+        self.fit_combo.setCurrentIndex(state['fit_index'])
         self.linear_switch.setChecked(state['linear'])
         self.reverse_check.setChecked(state['reverse'])
         self.auto_open_check.setChecked(state['auto_open'])
@@ -491,6 +592,8 @@ class TimesliceGUI(QMainWindow):
         # 刷新依赖状态与文件名预览
         self.update_timestamp_source_state()
         self.update_filename_preview()
+        # 语言切换重建后重新生成实时预览
+        self._schedule_preview()
 
     def update_menu_check_state(self):
         """更新菜单选中标记（✓）"""
@@ -556,7 +659,7 @@ class TimesliceGUI(QMainWindow):
 
         self.title_label = QLabel(self.tr("时间切片照片生成器"))
         self.title_label.setStyleSheet("font-size: 24px; font-weight: bold;")
-        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.title_label)
 
         # 输入设置
@@ -584,6 +687,21 @@ class TimesliceGUI(QMainWindow):
         output_dir_layout.addWidget(self.output_dir_edit)
         output_dir_layout.addWidget(self.output_dir_btn)
         input_layout.addLayout(output_dir_layout)
+
+        fit_layout = QHBoxLayout()
+        self.fit_label = QLabel(self.tr("尺寸适配:"))
+        self.fit_combo = QComboBox()
+        self.fit_combo.addItems([
+            self.tr("缩放居中补边"),
+            self.tr("居中裁切"),
+            self.tr("拉伸铺满"),
+            self.tr("不自动适配")
+        ])
+        self.fit_combo.setToolTip(self.tr("图片尺寸不一致时的处理方式（以第一张图为基准）"))
+        fit_layout.addWidget(self.fit_label)
+        fit_layout.addWidget(self.fit_combo)
+        fit_layout.addStretch()
+        input_layout.addLayout(fit_layout)
 
         self.input_group.setLayout(input_layout)
         main_layout.addWidget(self.input_group)
@@ -738,6 +856,21 @@ class TimesliceGUI(QMainWindow):
         self.output_naming_group.setLayout(naming_layout)
         main_layout.addWidget(self.output_naming_group)
 
+        # 实时预览
+        self.preview_group = QGroupBox(self.tr("实时预览"))
+        preview_layout = QVBoxLayout()
+        self.preview_canvas = QLabel()
+        self.preview_canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_canvas.setMinimumHeight(180)
+        self.preview_canvas.setStyleSheet("border: 1px solid #ccc; background-color: #1e1e1e; color: #888;")
+        self.preview_canvas.setText(self.tr("选择输入目录后自动预览"))
+        preview_layout.addWidget(self.preview_canvas)
+        self.preview_status_label = QLabel()
+        self.preview_status_label.setStyleSheet("color: #888;")
+        preview_layout.addWidget(self.preview_status_label)
+        self.preview_group.setLayout(preview_layout)
+        main_layout.addWidget(self.preview_group)
+
         # 进度信息
         self.progress_group = QGroupBox(self.tr("进度信息"))
         progress_layout = QVBoxLayout()
@@ -773,7 +906,7 @@ class TimesliceGUI(QMainWindow):
         # 初始化控件状态
         self.update_controls_state(0)
 
-        # 连接预览更新信号
+        # 连接文件名预览更新信号
         self.basename_edit.textChanged.connect(self.update_filename_preview)
         self.extension_combo.currentTextChanged.connect(self.update_filename_preview)
         self.timestamp_check.stateChanged.connect(self.update_timestamp_source_state)
@@ -783,6 +916,15 @@ class TimesliceGUI(QMainWindow):
         self.sort_combo.currentIndexChanged.connect(self.update_filename_preview)
         self.reverse_check.stateChanged.connect(self.update_filename_preview)
         self.input_dir_edit.textChanged.connect(self.update_filename_preview)
+
+        # 连接实时预览刷新信号（参数变化时触发，带防抖）
+        self.type_combo.currentIndexChanged.connect(self._schedule_preview)
+        self.position_combo.currentIndexChanged.connect(self._schedule_preview)
+        self.sort_combo.currentIndexChanged.connect(self._schedule_preview)
+        self.reverse_check.stateChanged.connect(self._schedule_preview)
+        self.fit_combo.currentIndexChanged.connect(self._schedule_preview)
+        self.linear_switch.toggled.connect(self._schedule_preview)
+        self.input_dir_edit.textChanged.connect(self._schedule_preview)
 
         # 初始化菜单选中状态 - 启动时自动选中中文和浅色模式
         self.update_menu_check_state()
@@ -1022,9 +1164,9 @@ class TimesliceGUI(QMainWindow):
     def refresh_linear_labels(self):
         """根据开关状态高亮右侧对应的选项文字"""
         palette = self.palette()
-        highlight = palette.color(QPalette.Highlight).name()
-        normal = palette.color(QPalette.WindowText).name()
-        disabled = palette.color(QPalette.Disabled, QPalette.WindowText).name()
+        highlight = palette.color(QPalette.ColorRole.Highlight).name()
+        normal = palette.color(QPalette.ColorRole.WindowText).name()
+        disabled = palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText).name()
 
         if not self.linear_switch.isEnabled():
             self.linear_top_label.setStyleSheet(f"color: {disabled}; font-weight: normal;")
@@ -1050,6 +1192,93 @@ class TimesliceGUI(QMainWindow):
         dir_path = QFileDialog.getExistingDirectory(self, self.tr("选择输出目录"))
         if dir_path:
             self.output_dir_edit.setText(dir_path)
+
+    # ---------- 实时预览 ----------
+    def _get_current_preview_params(self):
+        """收集当前参数用于预览"""
+        slice_type_map = {
+            self.tr("垂直切片"): "vertical",
+            self.tr("水平切片"): "horizontal",
+            self.tr("圆形扇形切片"): "circular_sector",
+            self.tr("椭圆形扇形切片"): "elliptical_sector",
+            self.tr("椭圆形环带切片"): "elliptical_band",
+            self.tr("矩形环带切片"): "rectangular_band",
+            self.tr("圆形环带切片"): "circular_band",
+            self.tr("垂直S型曲线"): "vertical_s",
+            self.tr("水平S型曲线"): "horizontal_s"
+        }
+        position_map = {
+            self.tr("左侧"): "left",
+            self.tr("居中"): "center",
+            self.tr("右侧"): "right",
+            self.tr("顶部"): "top",
+            self.tr("底部"): "bottom"
+        }
+        sort_map = {
+            self.tr("按文件名"): "name",
+            self.tr("按创建时间"): "created_time",
+            self.tr("按修改时间"): "modified_time"
+        }
+        fit_map = {
+            self.tr("缩放居中补边"): FIT_SCALE_CENTER,
+            self.tr("居中裁切"): FIT_CROP_CENTER,
+            self.tr("拉伸铺满"): FIT_STRETCH,
+            self.tr("不自动适配"): FIT_NONE
+        }
+        return {
+            'input_dir': self.input_dir_edit.text(),
+            'slice_type': slice_type_map.get(self.type_combo.currentText(), "vertical"),
+            'position': position_map.get(self.position_combo.currentText(), "center"),
+            'linear': self.linear_switch.isChecked(),
+            'sort_by': sort_map.get(self.sort_combo.currentText(), "name"),
+            'reverse': self.reverse_check.isChecked(),
+            'fit_strategy': fit_map.get(self.fit_combo.currentText(), FIT_SCALE_CENTER),
+        }
+
+    def _schedule_preview(self):
+        """参数变化时调度预览刷新（防抖）"""
+        if not self.input_dir_edit.text():
+            return
+        self._preview_timer.start()
+
+    def _refresh_preview(self):
+        """执行预览刷新（在后台线程中渲染）"""
+        input_dir = self.input_dir_edit.text()
+        if not input_dir:
+            self.preview_canvas.setText(self.tr("请选择输入目录"))
+            self.preview_status_label.setText("")
+            return
+
+        # 用请求序号淘汰过期的预览结果，无需终止旧线程
+        self._preview_request_seq += 1
+        params = self._get_current_preview_params()
+        params['max_images'] = 8
+        params['preview_max_side'] = 320
+
+        self.preview_status_label.setText(self.tr("正在生成预览..."))
+        self.preview_worker = PreviewWorker(params, self._preview_request_seq, self)
+        self.preview_worker.preview_ready.connect(self._on_preview_ready)
+        self.preview_worker.preview_failed.connect(self._on_preview_failed)
+        self.preview_worker.start()
+
+    def _on_preview_ready(self, pixmap, seq):
+        """预览生成完成（仅接受最新一次请求的结果）"""
+        if seq != self._preview_request_seq:
+            return
+        self.preview_status_label.setText(self.tr("实时预览（使用前 8 张图片）"))
+        if pixmap and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self.preview_canvas.width(), self.preview_canvas.height(),
+                Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.preview_canvas.setPixmap(scaled)
+
+    def _on_preview_failed(self, error_msg, seq):
+        """预览生成失败（仅接受最新一次请求的结果）"""
+        if seq != self._preview_request_seq:
+            return
+        self.preview_status_label.setText("")
+        self.preview_canvas.setText(self.tr("预览失败"))
+        # 将错误信息追加到日志（可选），不打断主流程
 
     def process_images(self):
         """处理图片"""
@@ -1115,6 +1344,15 @@ class TimesliceGUI(QMainWindow):
         }
         extension = extension_map.get(self.extension_combo.currentText(), "jpg")
 
+        # 映射尺寸适配策略
+        fit_map = {
+            self.tr("缩放居中补边"): FIT_SCALE_CENTER,
+            self.tr("居中裁切"): FIT_CROP_CENTER,
+            self.tr("拉伸铺满"): FIT_STRETCH,
+            self.tr("不自动适配"): FIT_NONE
+        }
+        fit_strategy = fit_map.get(self.fit_combo.currentText(), FIT_SCALE_CENTER)
+
         # 准备参数
         params = {
             'input_dir': input_dir,
@@ -1129,7 +1367,8 @@ class TimesliceGUI(QMainWindow):
             'include_slice_type': self.slice_type_check.isChecked(),
             'extension': extension,
             'lang': self.current_lang,
-            'timestamp_source': timestamp_source
+            'timestamp_source': timestamp_source,
+            'fit_strategy': fit_strategy
         }
 
         # 重置状态
@@ -1192,20 +1431,27 @@ class TimesliceGUI(QMainWindow):
 
     def closeEvent(self, event):
         """关闭窗口前先终止工作线程，避免后台继续写文件/占资源（#4）"""
+        self._preview_timer.stop()
         if self.worker is not None and self.worker.isRunning():
             self.worker.quit()
             self.worker.wait(3000)
             if self.worker.isRunning():
                 self.worker.terminate()
                 self.worker.wait(2000)
+        if self.preview_worker is not None and self.preview_worker.isRunning():
+            self.preview_worker.quit()
+            self.preview_worker.wait(1500)
+            if self.preview_worker.isRunning():
+                self.preview_worker.terminate()
+                self.preview_worker.wait(500)
         event.accept()
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
-    app.setAttribute(Qt.AA_DontUseNativeMenuBar, True)
+    app.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, True)
     app.setStyle("Fusion")
     window = TimesliceGUI()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
