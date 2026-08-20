@@ -142,5 +142,13 @@
     "正在生成预览...": "Generating preview...",
     "实时预览（使用前 8 张图片）": "Live preview (using first 8 images)",
     "预览失败": "Preview failed",
-    "适配图片失败:": "Failed to fit image:"
+    "预览失败:": "Preview failed:",
+    "适配图片失败:": "Failed to fit image:",
+    "取消处理": "Cancel",
+    "正在取消...": "Cancelling...",
+    "任务已被取消": "Task cancelled",
+    "任务已取消": "Task cancelled",
+    "正在处理中，请等待完成或取消": "Processing, please wait or cancel",
+    "图片正在生成中，请先点击\"取消处理\"后再关闭程序": "Images are still generating. Click Cancel first, then close the program.",
+    "后台任务仍在运行，请稍后再切换语言": "Background tasks are still running. Please try switching language later."
 }

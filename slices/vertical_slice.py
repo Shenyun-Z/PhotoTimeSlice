@@ -1,9 +1,13 @@
+from typing import Optional
+
 from PIL import Image
 
-from ._common import iter_with_count
+from ._common import ImageSource, ProgressCallback, iter_with_count
 
 
-def create_vertical_slice(images, position, linear=False, progress_callback=None, num_images=None):
+def create_vertical_slice(images: ImageSource, position: str, linear: bool = False,
+                          progress_callback: ProgressCallback = None,
+                          num_images: Optional[int] = None) -> Image.Image:
     """垂直条带切片。images 可为列表或生成器（流式），配合 num_images 使用。"""
     it, num_images, first = iter_with_count(images, num_images)
     if num_images == 0:

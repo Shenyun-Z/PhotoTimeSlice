@@ -2,6 +2,7 @@ import re
 import sys
 import os
 from pathlib import Path
+from typing import Iterator, List, Optional, Tuple, Union
 from PIL import Image
 from datetime import datetime
 from i18n import Translator
@@ -20,7 +21,7 @@ WINDOWS_RESERVED_NAMES = {
 }
 
 
-def sanitize_filename(name):
+def sanitize_filename(name: str) -> str:
     """过滤文件名中的非法字符，返回安全的基础名称（空时回退为 timeslice）"""
     name = ILLEGAL_FILENAME_CHARS.sub('_', (name or '').strip())
     name = name.strip('. ')
@@ -31,7 +32,7 @@ def sanitize_filename(name):
     return name or "timeslice"
 
 
-def get_base_path():
+def get_base_path() -> str:
     """获取正确的基础路径（兼容开发环境和打包环境）"""
     if is_frozen:
         # 如果是打包的exe，使用临时解压目录
@@ -41,13 +42,13 @@ def get_base_path():
         return os.path.dirname(os.path.abspath(__file__))
 
 
-def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
+def natural_sort_key(s: str, _nsre=re.compile('([0-9]+)')) -> List[Union[int, str]]:
     """Windows文件自然排序"""
     return [int(text) if text.isdigit() else text.lower()
             for text in _nsre.split(str(s))]
 
 
-def get_file_creation_time(path):
+def get_file_creation_time(path: Union[str, Path]) -> float:
     """获取文件创建时间"""
     try:
         return os.path.getctime(path)
@@ -55,7 +56,7 @@ def get_file_creation_time(path):
         return os.path.getmtime(path)
 
 
-def get_file_modification_time(path):
+def get_file_modification_time(path: Union[str, Path]) -> float:
     """获取文件修改时间"""
     return os.path.getmtime(path)
 
@@ -77,7 +78,7 @@ FIT_NONE = 'none'                   # 不自动适配（尺寸必须一致，否
 FIT_STRATEGIES = (FIT_SCALE_CENTER, FIT_CROP_CENTER, FIT_STRETCH, FIT_NONE)
 
 
-def open_image_single(path, lang='en'):
+def open_image_single(path: Union[str, Path], lang: str = 'en') -> Image.Image:
     """打开单张图片（支持 RAW），返回 PIL.Image；失败抛出明确异常"""
     translator = Translator(lang)
     path = Path(path)
@@ -97,7 +98,8 @@ def open_image_single(path, lang='en'):
         raise RuntimeError(f"{translator.tr('无法打开图片')} {path}: {e}")
 
 
-def fit_image(img, target_size, strategy=FIT_SCALE_CENTER, fill_color=(0, 0, 0)):
+def fit_image(img: Image.Image, target_size: Tuple[int, int], strategy: str = FIT_SCALE_CENTER,
+              fill_color: Tuple[int, int, int] = (0, 0, 0)) -> Image.Image:
     """
     将图片适配到目标尺寸。
 
@@ -140,8 +142,9 @@ def fit_image(img, target_size, strategy=FIT_SCALE_CENTER, fill_color=(0, 0, 0))
     raise ValueError(f"未知适配策略: {strategy}")
 
 
-def iter_images(input_dir, sort_by='name', reverse=False, fit_strategy=FIT_SCALE_CENTER,
-                fill_color=(0, 0, 0), lang='en'):
+def iter_images(input_dir: Union[str, Path], sort_by: str = 'name', reverse: bool = False,
+                fit_strategy: str = FIT_SCALE_CENTER,
+                fill_color: Tuple[int, int, int] = (0, 0, 0), lang: str = 'en') -> Iterator[Image.Image]:
     """
     流式加载并适配图片（生成器）。
 
@@ -170,7 +173,8 @@ def iter_images(input_dir, sort_by='name', reverse=False, fit_strategy=FIT_SCALE
         yield img
 
 
-def load_images(input_dir, sort_by='name', reverse=False, lang='en'):
+def load_images(input_dir: Union[str, Path], sort_by: str = 'name', reverse: bool = False,
+                lang: str = 'en') -> List[Image.Image]:
     """加载目录中的全部图片到列表（一次性载入，兼容性接口；大目录请使用 iter_images）"""
     translator = Translator(lang)
     if not os.path.exists(input_dir):
@@ -186,7 +190,8 @@ def load_images(input_dir, sort_by='name', reverse=False, lang='en'):
     return images
 
 
-def get_sorted_image_paths(input_dir, sort_by='name', reverse=False):
+def get_sorted_image_paths(input_dir: Union[str, Path], sort_by: str = 'name',
+                           reverse: bool = False) -> List[Path]:
     """返回排序后的图片路径列表（不加载图像，用于时间戳计算）"""
     image_extensions = list(IMAGE_EXTENSIONS)
 
@@ -209,7 +214,7 @@ def get_sorted_image_paths(input_dir, sort_by='name', reverse=False):
     return image_paths
 
 
-def get_exif_capture_time(path):
+def get_exif_capture_time(path: Union[str, Path]) -> Optional[datetime]:
     """读取照片 EXIF 拍摄时间，失败返回 None"""
     try:
         with Image.open(path) as img:
@@ -229,12 +234,13 @@ def get_exif_capture_time(path):
         return None
 
 
-def format_timestamp(dt):
+def format_timestamp(dt: datetime) -> str:
     """格式化时间戳为 YYYYMMDD_HHMMSS"""
     return dt.strftime("%Y%m%d_%H%M%S")
 
 
-def compute_timestamp(source, input_dir, sort_by='name', reverse=False):
+def compute_timestamp(source: str, input_dir: str, sort_by: str = 'name',
+                      reverse: bool = False) -> Optional[str]:
     """
     根据 source 计算文件名时间戳字符串，无可用照片时返回 None。
     source: first_capture / last_capture / first_modified / last_modified / composition

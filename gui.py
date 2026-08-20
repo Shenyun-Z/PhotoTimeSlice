@@ -24,6 +24,77 @@ from utils import (
 )
 
 
+# ===================== 本地化映射常量（i18n key -> 内部值） =====================
+# 运行时通过 self.tr(key) 转换为当前语言的显示文本 -> 内部值，避免各处重复定义。
+# key 使用 i18n 语言包中的翻译键，value 为内部稳定值（不随语言变化）。
+
+# 切片类型: 显示文本 -> 内部类型 key
+SLICE_TYPE_MAP = {
+    "垂直切片": "vertical",
+    "水平切片": "horizontal",
+    "圆形扇形切片": "circular_sector",
+    "椭圆形扇形切片": "elliptical_sector",
+    "椭圆形环带切片": "elliptical_band",
+    "矩形环带切片": "rectangular_band",
+    "圆形环带切片": "circular_band",
+    "垂直S型曲线": "vertical_s",
+    "水平S型曲线": "horizontal_s",
+}
+
+# 切片类型文件名简称（key 与 value 均为 i18n key，用于 update_filename_preview）
+SLICE_TYPE_SHORT_MAP = {
+    "垂直切片": "垂直",
+    "水平切片": "水平",
+    "圆形扇形切片": "圆形扇形",
+    "椭圆形扇形切片": "椭圆形扇形",
+    "椭圆形环带切片": "椭圆形环带",
+    "矩形环带切片": "矩形环带",
+    "圆形环带切片": "圆形环带",
+    "垂直S型曲线": "垂直S型",
+    "水平S型曲线": "水平S型",
+}
+
+# 位置: 显示文本 -> 内部位置 key
+POSITION_MAP = {
+    "左侧": "left",
+    "居中": "center",
+    "右侧": "right",
+    "顶部": "top",
+    "底部": "bottom",
+}
+
+# 排序: 显示文本 -> 内部排序 key
+SORT_MAP = {
+    "按文件名": "name",
+    "按创建时间": "created_time",
+    "按修改时间": "modified_time",
+}
+
+# 时间戳来源: 显示文本 -> 内部来源 key
+TIMESTAMP_SOURCE_MAP = {
+    "第一张照片拍摄时间": "first_capture",
+    "最后一张照片拍摄时间": "last_capture",
+    "第一张照片修改时间": "first_modified",
+    "最后一张照片修改时间": "last_modified",
+    "时间切片合成时间": "composition",
+}
+
+# 输出扩展名（固定英文，无需翻译）
+EXTENSION_MAP = {
+    "JPG": "jpg",
+    "PNG": "png",
+    "WebP": "webp",
+}
+
+# 尺寸适配策略: 显示文本 -> 内部策略值
+FIT_MAP = {
+    "缩放居中补边": FIT_SCALE_CENTER,
+    "居中裁切": FIT_CROP_CENTER,
+    "拉伸铺满": FIT_STRETCH,
+    "不自动适配": FIT_NONE,
+}
+
+
 class LogEvent(QEvent):
     """用于线程安全日志更新的自定义事件"""
     EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
@@ -40,10 +111,19 @@ class TimesliceWorker(QThread):
     finished_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str)
+    cancelled_signal = pyqtSignal()
 
     def __init__(self, params):
         super().__init__()
         self.params = params
+        # 缓存 Translator，避免每次 tr() 重新加载 JSON 翻译文件（磁盘 I/O）
+        self._translator = Translator(self.params.get('lang', 'en'))
+        # 取消标志：由 GUI 主线程调用 cancel() 置位，工作线程在进度回调中检查
+        self._cancel_requested = False
+
+    def cancel(self):
+        """请求取消当前任务（线程安全，仅置标志位）"""
+        self._cancel_requested = True
 
     def run(self):
         try:
@@ -62,6 +142,9 @@ class TimesliceWorker(QThread):
             self.log_signal.emit(f"找到 {total_images} 张图片，开始处理...")
 
             def progress_callback(current):
+                if self._cancel_requested:
+                    from cli import OperationCancelled
+                    raise OperationCancelled("任务已被用户取消")
                 self.progress_signal.emit(current)
 
             output_path = run_timeslice(
@@ -85,12 +168,15 @@ class TimesliceWorker(QThread):
             self.progress_signal.emit(total_images)
             self.finished_signal.emit(output_path)
         except Exception as e:
-            self.error_signal.emit(str(e))
+            from cli import OperationCancelled
+            if isinstance(e, OperationCancelled):
+                self.cancelled_signal.emit()
+            else:
+                self.error_signal.emit(str(e))
 
     def tr(self, text):
-        """翻译方法（线程内），使用用户选择的语言"""
-        translator = Translator(self.params.get('lang', 'en'))
-        return translator.tr(text)
+        """翻译方法（线程内），使用用户选择的语言（Translator 已缓存）"""
+        return self._translator.tr(text)
 
 
 class PreviewWorker(QThread):
@@ -128,10 +214,12 @@ class PreviewWorker(QThread):
             if not paths:
                 raise Exception("no images")
 
-            # 流式加载缩略图并统一尺寸
+            # 流式加载缩略图并统一尺寸（支持中断请求，避免语言切换/关窗时阻塞）
             thumbs = []
             base_size = None
             for path in paths:
+                if self.isInterruptionRequested():
+                    return
                 img = open_image_single(path, 'en')
                 img.thumbnail((preview_max_side, preview_max_side), Image.LANCZOS)
                 img = img.convert('RGB')
@@ -177,8 +265,30 @@ class PreviewWorker(QThread):
             self.preview_failed.emit(str(e), self.request_seq)
 
 
+class TimestampComputeWorker(QThread):
+    """后台时间戳计算线程：扫描目录读 EXIF 属 I/O 操作，移出主线程避免阻塞 GUI"""
+    computed = pyqtSignal(tuple, object)  # (cache_key, timestamp_str or None)
+
+    def __init__(self, source, input_dir, sort_by, reverse, parent=None):
+        super().__init__(parent)
+        self.source = source
+        self.input_dir = input_dir
+        self.sort_by = sort_by
+        self.reverse = reverse
+        self.cache_key = (source, input_dir, sort_by, reverse)
+
+    def run(self):
+        try:
+            from utils import compute_timestamp
+            ts = compute_timestamp(self.source, self.input_dir, self.sort_by, self.reverse)
+            self.computed.emit(self.cache_key, ts)
+        except Exception:
+            # 计算失败不阻断 UI，交回主线程显示占位符
+            self.computed.emit(self.cache_key, None)
+
+
 class VerticalModeSwitch(QWidget):
-    """竖向滑动开关：上下滑动切换两种模式"""
+    """竖向模式开关：只有上下两个状态，点击整个控件切换一次模式（不随拖动频繁发射信号）"""
     toggled = pyqtSignal(bool)
 
     def __init__(self, parent=None):
@@ -186,8 +296,6 @@ class VerticalModeSwitch(QWidget):
         self._checked = False
         self._top_text = ""
         self._bottom_text = ""
-        self._dragging = False
-        self._press_pos = 0
         self.setFixedSize(40, 90)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -214,22 +322,10 @@ class VerticalModeSwitch(QWidget):
     def isChecked(self):
         return self._checked
 
-    def mousePressEvent(self, event: QMouseEvent):
-        if not self.isEnabled():
-            return
-        self._dragging = True
-        self._press_pos = event.pos().y()
-        mid = self.height() // 2
-        self.setChecked(event.pos().y() > mid)
-
-    def mouseMoveEvent(self, event: QMouseEvent):
-        if not self._dragging or not self.isEnabled():
-            return
-        mid = self.height() // 2
-        self.setChecked(event.pos().y() > mid)
-
     def mouseReleaseEvent(self, event: QMouseEvent):
-        self._dragging = False
+        # 点击切换：仅左键且控件可用时切换一次（上下两个状态互斥）
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.setChecked(not self._checked)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -275,6 +371,7 @@ class TimesliceGUI(QMainWindow):
         self.translator = Translator()
         self.current_lang = self.settings.value("language", "zh_CN")
         self.translator.load_translations(self.current_lang)
+        self._build_localized_maps()
 
         self.app = QApplication.instance()
 
@@ -293,15 +390,34 @@ class TimesliceGUI(QMainWindow):
 
         # 实时预览相关状态
         self.preview_worker = None
+        self._preview_pending = False          # 跳过模式下记录待刷新的最新参数
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(300)  # 防抖：参数连续变化时延迟刷新
         self._preview_timer.timeout.connect(self._refresh_preview)
         self._preview_request_seq = 0
 
+        # 时间戳异步计算状态（避免主线程扫描目录/读 EXIF 阻塞）
+        self._timestamp_cache = {}            # cache_key -> 已计算的时间戳
+        self._ts_worker = None                # 当前运行中的时间戳计算线程
+        self._ts_pending_key = None           # 待计算的最新 key（合并连续请求）
+        self._ts_timer = QTimer(self)
+        self._ts_timer.setSingleShot(True)
+        self._ts_timer.setInterval(300)       # 防抖：合并连续输入产生的计算请求
+        self._ts_timer.timeout.connect(self._start_timestamp_worker)
+
     def tr(self, text):
         """翻译方法"""
         return self.translator.tr(text)
+
+    def _build_localized_maps(self):
+        """按当前语言构建本地化映射缓存（语言切换时重建）"""
+        self._l_slice_type = {self.tr(k): v for k, v in SLICE_TYPE_MAP.items()}
+        self._l_slice_type_short = {self.tr(k): self.tr(v) for k, v in SLICE_TYPE_SHORT_MAP.items()}
+        self._l_position = {self.tr(k): v for k, v in POSITION_MAP.items()}
+        self._l_sort = {self.tr(k): v for k, v in SORT_MAP.items()}
+        self._l_timestamp_source = {self.tr(k): v for k, v in TIMESTAMP_SOURCE_MAP.items()}
+        self._l_fit = {self.tr(k): v for k, v in FIT_MAP.items()}
 
     def apply_theme_style(self, theme_type):
         """应用Windows主题样式"""
@@ -536,10 +652,36 @@ class TimesliceGUI(QMainWindow):
         self.update_menu_check_state()
 
     def change_language(self, lang):
-        """切换语言并更新菜单标记"""
+        """切换语言并更新菜单标记。
+
+        重建 UI 前先确保后台线程已安全停止：
+        - 切片任务（worker）在跑时禁止切换（菜单已置灰，此处双保险返回）
+        - 预览/时间戳线程通过 requestInterruption + 短等待自然结束
+        避免信号发送到已销毁控件导致段错误。
+        """
+        # 切片任务运行中禁止切换（菜单已置灰，双保险）
+        if self.worker is not None and self.worker.isRunning():
+            self.status_bar.showMessage(self.tr("正在处理中，请等待完成或取消"))
+            return
+
+        # 停止定时器
+        self._preview_timer.stop()
+        self._ts_timer.stop()
+
+        # 停止后台线程：断开信号 + 中断 + 等待完全结束。
+        # 若线程未能及时停止（极端情况：卡在切片计算/EXIF 读取），放弃本次切换，
+        # 避免旧线程完成后的信号发送到已重建控件导致段错误。
+        if not self._stop_background_threads(timeout_ms=3000):
+            self.status_bar.showMessage(self.tr("后台任务仍在运行，请稍后再切换语言"))
+            return
+        # 线程已全部停止并断开信号，可安全重建 UI
+        self.preview_worker = None
+        self._ts_worker = None
+
         self.current_lang = lang
         self.settings.setValue("language", lang)
         self.translator.load_translations(lang)
+        self._build_localized_maps()
 
         # 重建前先保存用户已填写的设置（路径、选项等）
         state = self._capture_ui_state()
@@ -596,16 +738,21 @@ class TimesliceGUI(QMainWindow):
         self._schedule_preview()
 
     def update_menu_check_state(self):
-        """更新菜单选中标记（✓）"""
+        """更新菜单选中标记（✓）与可用状态"""
         # 更新主题菜单
         if hasattr(self, 'light_theme_action'):
             self.light_theme_action.setChecked(self.current_theme == "light")
             self.dark_theme_action.setChecked(self.current_theme == "dark")
 
-        # 更新语言菜单
+        # 更新语言菜单（任务在跑时置灰，禁止切换避免重建 UI 时线程信号指向已销毁控件）
         if hasattr(self, 'chinese_action'):
             self.chinese_action.setChecked(self.current_lang == "zh_CN")
             self.english_action.setChecked(self.current_lang == "en")
+            # worker 属性在 __init__ 中 init_ui() 之后才初始化，需安全访问
+            worker = getattr(self, 'worker', None)
+            worker_busy = worker is not None and worker.isRunning()
+            self.chinese_action.setEnabled(not worker_busy)
+            self.english_action.setEnabled(not worker_busy)
 
     def init_ui(self):
         """初始化Windows界面（移除跟随系统+添加选中标记）"""
@@ -888,12 +1035,18 @@ class TimesliceGUI(QMainWindow):
         self.progress_group.setLayout(progress_layout)
         main_layout.addWidget(self.progress_group)
 
-        # 生成按钮
+        # 生成 / 取消按钮
         button_layout = QHBoxLayout()
         self.process_btn = QPushButton(self.tr("生成时间切片"))
         self.process_btn.clicked.connect(self.process_images)
         self.process_btn.setMinimumHeight(40)
         button_layout.addWidget(self.process_btn)
+
+        self.cancel_btn = QPushButton(self.tr("取消处理"))
+        self.cancel_btn.clicked.connect(self.cancel_processing)
+        self.cancel_btn.setMinimumHeight(40)
+        self.cancel_btn.setEnabled(False)
+        button_layout.addWidget(self.cancel_btn)
         main_layout.addLayout(button_layout)
 
         main_widget = QWidget()
@@ -930,8 +1083,8 @@ class TimesliceGUI(QMainWindow):
         self.update_menu_check_state()
 
     def update_filename_preview(self):
-        """更新文件名预览（含真实时间戳来源）"""
-        from utils import compute_timestamp, sanitize_filename
+        """更新文件名预览（时间戳后台异步计算，避免主线程扫描目录阻塞）"""
+        from utils import sanitize_filename
 
         # 获取当前设置
         basename = sanitize_filename(self.basename_edit.text() or "timeslice")
@@ -940,42 +1093,22 @@ class TimesliceGUI(QMainWindow):
         include_slice_type = self.slice_type_check.isChecked()
 
         # 获取切片类型（文件名简称随语言切换）
-        slice_type_map = {
-            self.tr("垂直切片"): self.tr("垂直"),
-            self.tr("水平切片"): self.tr("水平"),
-            self.tr("圆形扇形切片"): self.tr("圆形扇形"),
-            self.tr("椭圆形扇形切片"): self.tr("椭圆形扇形"),
-            self.tr("椭圆形环带切片"): self.tr("椭圆形环带"),
-            self.tr("矩形环带切片"): self.tr("矩形环带"),
-            self.tr("圆形环带切片"): self.tr("圆形环带"),
-            self.tr("垂直S型曲线"): self.tr("垂直S型"),
-            self.tr("水平S型曲线"): self.tr("水平S型")
-        }
-        slice_type_text = slice_type_map.get(self.type_combo.currentText(), "")
+        slice_type_text = self._l_slice_type_short.get(self.type_combo.currentText(), "")
 
         # 排序映射
-        sort_map = {
-            self.tr("按文件名"): "name",
-            self.tr("按创建时间"): "created_time",
-            self.tr("按修改时间"): "modified_time"
-        }
-        sort_by = sort_map.get(self.sort_combo.currentText(), "name")
+        sort_by = self._l_sort.get(self.sort_combo.currentText(), "name")
 
         # 构建文件名部分
         parts = [basename]
 
         if include_timestamp:
-            source_map = {
-                self.tr("第一张照片拍摄时间"): "first_capture",
-                self.tr("最后一张照片拍摄时间"): "last_capture",
-                self.tr("第一张照片修改时间"): "first_modified",
-                self.tr("最后一张照片修改时间"): "last_modified",
-                self.tr("时间切片合成时间"): "composition"
-            }
-            source = source_map.get(self.timestamp_source_combo.currentText(), "composition")
-            ts = compute_timestamp(source, self.input_dir_edit.text(), sort_by, self.reverse_check.isChecked())
+            source = self._l_timestamp_source.get(self.timestamp_source_combo.currentText(), "composition")
+            # 时间戳完全异步化：先查缓存，未命中则显示占位符并调度后台计算
+            cache_key = (source, self.input_dir_edit.text(), sort_by, self.reverse_check.isChecked())
+            ts = self._timestamp_cache.get(cache_key)
             if ts is None:
-                ts = "YYYYMMDD_HHMMSS"
+                ts = "YYYYMMDD_HHMMSS"  # 占位符，后台算完后自动刷新
+                self._schedule_timestamp_compute(source, cache_key)
             parts.append(ts)
 
         if include_slice_type and slice_type_text:
@@ -994,6 +1127,69 @@ class TimesliceGUI(QMainWindow):
 
         preview_text = f"{filename}.{extension}"
         self.filename_preview.setText(preview_text)
+
+    # ---------- 后台线程安全停止 ----------
+    def _stop_background_threads(self, timeout_ms=3000):
+        """停止预览/时间戳线程：断开信号连接 + 请求中断 + 等待线程结束。
+
+        关键：先 disconnect() 断掉所有信号槽连接。这样即使线程稍后完成并
+        emit 信号，也不会调用到已失效/已重建的槽函数（从根本上杜绝野指针
+        段错误）。之后请求中断并等待线程自然结束。
+
+        返回 True 表示全部线程已停止；False 表示有线程超时仍在运行
+        （此时信号已断开，仍安全，仅线程对象仍在后台）。
+        """
+        ok = True
+        workers = (
+            (self.preview_worker, ('preview_ready', 'preview_failed')),
+            (self._ts_worker, ('computed',)),
+        )
+        for worker, signal_names in workers:
+            if worker is None or not worker.isRunning():
+                continue
+            # 1. 断开所有信号连接：线程完成后的 emit 不再触发任何槽
+            for name in signal_names:
+                try:
+                    getattr(worker, name).disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            # 2. 请求中断并等待自然结束
+            worker.requestInterruption()
+            if not worker.wait(timeout_ms):
+                ok = False
+        return ok
+
+    # ---------- 时间戳异步计算 ----------
+    def _schedule_timestamp_compute(self, source, cache_key):
+        """调度时间戳后台计算（合并连续请求，防抖 300ms 后启动）"""
+        if cache_key in self._timestamp_cache:
+            return
+        self._ts_pending_key = (source, cache_key)
+        self._ts_timer.start()
+
+    def _start_timestamp_worker(self):
+        """启动时间戳计算线程（仅计算最新待处理请求，跳过模式不阻塞主线程）"""
+        if self._ts_pending_key is None:
+            return
+        # 跳过模式：若旧线程仍在运行，放弃本次启动；旧线程完成后的
+        # update_filename_preview 会发现缓存未命中而重新调度，最终必算到
+        if self._ts_worker is not None and self._ts_worker.isRunning():
+            return
+        source, cache_key = self._ts_pending_key
+        self._ts_pending_key = None
+        input_dir, sort_by, reverse = cache_key[1], cache_key[2], cache_key[3]
+        self._ts_worker = TimestampComputeWorker(source, input_dir, sort_by, reverse, self)
+        self._ts_worker.computed.connect(self._on_timestamp_computed)
+        self._ts_worker.start()
+
+    def _on_timestamp_computed(self, cache_key, ts):
+        """时间戳计算完成：更新缓存并刷新预览（sender 防御：忽略旧线程残留信号）"""
+        if self.sender() is not self._ts_worker:
+            return
+        if ts is not None:
+            self._timestamp_cache[cache_key] = ts
+        # 无论成功与否都刷新预览（失败时保持占位符）
+        self.update_filename_preview()
 
     def update_timestamp_source_state(self):
         """时间戳复选框切换时启用/禁用来源下拉框并刷新预览"""
@@ -1196,43 +1392,14 @@ class TimesliceGUI(QMainWindow):
     # ---------- 实时预览 ----------
     def _get_current_preview_params(self):
         """收集当前参数用于预览"""
-        slice_type_map = {
-            self.tr("垂直切片"): "vertical",
-            self.tr("水平切片"): "horizontal",
-            self.tr("圆形扇形切片"): "circular_sector",
-            self.tr("椭圆形扇形切片"): "elliptical_sector",
-            self.tr("椭圆形环带切片"): "elliptical_band",
-            self.tr("矩形环带切片"): "rectangular_band",
-            self.tr("圆形环带切片"): "circular_band",
-            self.tr("垂直S型曲线"): "vertical_s",
-            self.tr("水平S型曲线"): "horizontal_s"
-        }
-        position_map = {
-            self.tr("左侧"): "left",
-            self.tr("居中"): "center",
-            self.tr("右侧"): "right",
-            self.tr("顶部"): "top",
-            self.tr("底部"): "bottom"
-        }
-        sort_map = {
-            self.tr("按文件名"): "name",
-            self.tr("按创建时间"): "created_time",
-            self.tr("按修改时间"): "modified_time"
-        }
-        fit_map = {
-            self.tr("缩放居中补边"): FIT_SCALE_CENTER,
-            self.tr("居中裁切"): FIT_CROP_CENTER,
-            self.tr("拉伸铺满"): FIT_STRETCH,
-            self.tr("不自动适配"): FIT_NONE
-        }
         return {
             'input_dir': self.input_dir_edit.text(),
-            'slice_type': slice_type_map.get(self.type_combo.currentText(), "vertical"),
-            'position': position_map.get(self.position_combo.currentText(), "center"),
+            'slice_type': self._l_slice_type.get(self.type_combo.currentText(), "vertical"),
+            'position': self._l_position.get(self.position_combo.currentText(), "center"),
             'linear': self.linear_switch.isChecked(),
-            'sort_by': sort_map.get(self.sort_combo.currentText(), "name"),
+            'sort_by': self._l_sort.get(self.sort_combo.currentText(), "name"),
             'reverse': self.reverse_check.isChecked(),
-            'fit_strategy': fit_map.get(self.fit_combo.currentText(), FIT_SCALE_CENTER),
+            'fit_strategy': self._l_fit.get(self.fit_combo.currentText(), FIT_SCALE_CENTER),
         }
 
     def _schedule_preview(self):
@@ -1242,14 +1409,22 @@ class TimesliceGUI(QMainWindow):
         self._preview_timer.start()
 
     def _refresh_preview(self):
-        """执行预览刷新（在后台线程中渲染）"""
+        """执行预览刷新（跳过模式：旧线程运行中则放弃本次，不 terminate、不堆积）"""
         input_dir = self.input_dir_edit.text()
         if not input_dir:
             self.preview_canvas.setText(self.tr("请选择输入目录"))
             self.preview_status_label.setText("")
             return
 
-        # 用请求序号淘汰过期的预览结果，无需终止旧线程
+        # 跳过模式：旧预览线程仍在运行则放弃本次刷新（防抖 300ms 会在
+        # 下次参数变化时重新触发；旧线程完成后由 _on_preview_ready 检查
+        # _preview_pending 自动补刷，不丢最终结果）
+        if self.preview_worker is not None and self.preview_worker.isRunning():
+            self._preview_pending = True
+            return
+
+        self._preview_pending = False
+        # 用请求序号淘汰过期的预览结果
         self._preview_request_seq += 1
         params = self._get_current_preview_params()
         params['max_images'] = 8
@@ -1262,7 +1437,10 @@ class TimesliceGUI(QMainWindow):
         self.preview_worker.start()
 
     def _on_preview_ready(self, pixmap, seq):
-        """预览生成完成（仅接受最新一次请求的结果）"""
+        """预览生成完成（仅接受当前 worker + 最新一次请求的结果）"""
+        # sender 防御：旧线程（重建 UI 前的实例）的信号即使漏到此处也直接忽略
+        if self.sender() is not self.preview_worker:
+            return
         if seq != self._preview_request_seq:
             return
         self.preview_status_label.setText(self.tr("实时预览（使用前 8 张图片）"))
@@ -1271,17 +1449,32 @@ class TimesliceGUI(QMainWindow):
                 self.preview_canvas.width(), self.preview_canvas.height(),
                 Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.preview_canvas.setPixmap(scaled)
+        self._flush_preview_pending()
 
     def _on_preview_failed(self, error_msg, seq):
-        """预览生成失败（仅接受最新一次请求的结果）"""
+        """预览生成失败（仅接受当前 worker + 最新一次请求的结果），记录详细错误到日志"""
+        if self.sender() is not self.preview_worker:
+            return
         if seq != self._preview_request_seq:
             return
         self.preview_status_label.setText("")
         self.preview_canvas.setText(self.tr("预览失败"))
-        # 将错误信息追加到日志（可选），不打断主流程
+        self.error_log.append(f"{self.tr('预览失败:')} {error_msg}")
+        self._flush_preview_pending()
+
+    def _flush_preview_pending(self):
+        """跳过模式下，旧线程完成后再补刷最新一次被跳过的参数"""
+        if self._preview_pending:
+            self._preview_pending = False
+            self._refresh_preview()
 
     def process_images(self):
         """处理图片"""
+        # 守卫：工作线程仍在运行时禁止重复启动（防止多实例并发写同一输出目录）
+        if self.worker is not None and self.worker.isRunning():
+            self.status_bar.showMessage(self.tr("正在处理中，请等待完成或取消"))
+            return
+
         input_dir = self.input_dir_edit.text()
         output_dir = self.output_dir_edit.text()
 
@@ -1293,65 +1486,13 @@ class TimesliceGUI(QMainWindow):
             QMessageBox.warning(self, self.tr("警告"), self.tr("请选择输出目录"))
             return
 
-        # 映射切片类型
-        slice_type_map = {
-            self.tr("垂直切片"): "vertical",
-            self.tr("水平切片"): "horizontal",
-            self.tr("圆形扇形切片"): "circular_sector",
-            self.tr("椭圆形扇形切片"): "elliptical_sector",
-            self.tr("椭圆形环带切片"): "elliptical_band",
-            self.tr("矩形环带切片"): "rectangular_band",
-            self.tr("圆形环带切片"): "circular_band",
-            self.tr("垂直S型曲线"): "vertical_s",
-            self.tr("水平S型曲线"): "horizontal_s"
-        }
-
-        slice_type = slice_type_map.get(self.type_combo.currentText(), "vertical")
-
-        # 映射位置
-        position_map = {
-            self.tr("左侧"): "left",
-            self.tr("居中"): "center",
-            self.tr("右侧"): "right",
-            self.tr("顶部"): "top",
-            self.tr("底部"): "bottom"
-        }
-        position = position_map.get(self.position_combo.currentText(), "center")
-
-        # 映射排序规则
-        sort_map = {
-            self.tr("按文件名"): "name",
-            self.tr("按创建时间"): "created_time",
-            self.tr("按修改时间"): "modified_time"
-        }
-        sort_by = sort_map.get(self.sort_combo.currentText(), "name")
-
-        # 映射时间戳来源
-        timestamp_source_map = {
-            self.tr("第一张照片拍摄时间"): "first_capture",
-            self.tr("最后一张照片拍摄时间"): "last_capture",
-            self.tr("第一张照片修改时间"): "first_modified",
-            self.tr("最后一张照片修改时间"): "last_modified",
-            self.tr("时间切片合成时间"): "composition"
-        }
-        timestamp_source = timestamp_source_map.get(self.timestamp_source_combo.currentText(), "composition")
-
-        # 获取文件扩展名
-        extension_map = {
-            "JPG": "jpg",
-            "PNG": "png",
-            "WebP": "webp"
-        }
-        extension = extension_map.get(self.extension_combo.currentText(), "jpg")
-
-        # 映射尺寸适配策略
-        fit_map = {
-            self.tr("缩放居中补边"): FIT_SCALE_CENTER,
-            self.tr("居中裁切"): FIT_CROP_CENTER,
-            self.tr("拉伸铺满"): FIT_STRETCH,
-            self.tr("不自动适配"): FIT_NONE
-        }
-        fit_strategy = fit_map.get(self.fit_combo.currentText(), FIT_SCALE_CENTER)
+        # 映射切片类型 / 位置 / 排序 / 时间戳来源 / 扩展名 / 尺寸适配（使用本地化映射缓存）
+        slice_type = self._l_slice_type.get(self.type_combo.currentText(), "vertical")
+        position = self._l_position.get(self.position_combo.currentText(), "center")
+        sort_by = self._l_sort.get(self.sort_combo.currentText(), "name")
+        timestamp_source = self._l_timestamp_source.get(self.timestamp_source_combo.currentText(), "composition")
+        extension = EXTENSION_MAP.get(self.extension_combo.currentText(), "jpg")
+        fit_strategy = self._l_fit.get(self.fit_combo.currentText(), FIT_SCALE_CENTER)
 
         # 准备参数
         params = {
@@ -1374,26 +1515,25 @@ class TimesliceGUI(QMainWindow):
         # 重置状态
         self.error_log.clear()
         self.process_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
         # 读取目录完成前，进度条显示静止的 0%，不播放动画
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat(self.tr("已处理 %v 张"))
 
-        # 快速检查目录是否含图片（仅列举路径，不加载像素，避免主线程卡顿与重复加载，#5）
-        from utils import get_sorted_image_paths
-        if not get_sorted_image_paths(input_dir, sort_by, self.reverse_check.isChecked()):
-            QMessageBox.warning(self, self.tr("警告"), self.tr("输入目录中没有找到图片"))
-            self.process_btn.setEnabled(True)
-            return
-
-        # 启动工作线程：图片加载与切片处理均在子线程完成（#5）
+        # 启动工作线程：图片加载与切片处理均在子线程完成。
+        # 目录扫描由 Worker 内的 get_sorted_image_paths 单次完成（GUI 不再预扫描，避免双倍 I/O）；
+        # 空目录/目录不存在等错误由 Worker 通过 error_signal 上报。
         self.worker = TimesliceWorker(params)
         self.worker.total_signal.connect(self.on_total_images)
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.finished_signal.connect(self.process_finished)
         self.worker.error_signal.connect(self.process_error)
         self.worker.log_signal.connect(self.log_message)
+        self.worker.cancelled_signal.connect(self.process_cancelled)
         self.worker.start()
+        # 任务在跑时语言菜单置灰（禁止切换重建 UI）
+        self.update_menu_check_state()
 
     def update_progress(self, value):
         """更新进度"""
@@ -1411,16 +1551,38 @@ class TimesliceGUI(QMainWindow):
         """日志消息"""
         self.status_bar.showMessage(message)
 
+    def cancel_processing(self):
+        """请求取消当前处理任务"""
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.cancel_btn.setEnabled(False)
+            self.status_bar.showMessage(self.tr("正在取消..."))
+
+    def process_cancelled(self):
+        """任务被用户取消"""
+        self.error_log.append(self.tr("任务已被取消"))
+        self.process_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.status_bar.showMessage(self.tr("任务已取消"))
+        # 任务结束，恢复语言菜单可用
+        self.update_menu_check_state()
+
     def process_error(self, error_msg):
         """处理错误"""
         self.error_log.append(f"{self.tr('错误:')} {error_msg}")
         self.process_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
         self.status_bar.showMessage(self.tr("处理出错"))
+        # 任务结束，恢复语言菜单可用
+        self.update_menu_check_state()
 
     def process_finished(self, output_path):
         """处理完成"""
         self.status_bar.showMessage(f"{self.tr('时间切片已保存至:')} {output_path}")
         self.process_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        # 任务结束，恢复语言菜单可用
+        self.update_menu_check_state()
 
         # Windows自动打开图片
         if self.auto_open_check.isChecked():
@@ -1430,20 +1592,37 @@ class TimesliceGUI(QMainWindow):
                 self.error_log.append(f"{self.tr('无法打开图片:')} {str(e)}")
 
     def closeEvent(self, event):
-        """关闭窗口前先终止工作线程，避免后台继续写文件/占资源（#4）"""
+        """关闭窗口时优雅退出后台线程，保证输出文件完整性（#4）
+
+        策略：
+        - 切片任务：先请求取消（进度回调逐张检查，很快退出）；save 阶段不打断；
+          等待 10s 仍未结束则拒绝关闭（event.ignore）并提示用户先取消，避免
+          QThread.terminate() 中断 PIL 写入造成文件损坏或进程崩溃。
+        - 预览/时间戳线程：requestInterruption + 短等待自然结束（不强制终止）。
+        """
         self._preview_timer.stop()
+        self._ts_timer.stop()
+
+        # 切片任务：优雅取消，超时拒绝关闭
         if self.worker is not None and self.worker.isRunning():
-            self.worker.quit()
-            self.worker.wait(3000)
-            if self.worker.isRunning():
-                self.worker.terminate()
-                self.worker.wait(2000)
+            self.worker.cancel()
+            if not self.worker.wait(10000):
+                # 保存阶段或极端情况无法及时退出：拒绝关闭，保护文件完整性
+                QMessageBox.warning(self, self.tr("警告"),
+                                    self.tr("图片正在生成中，请先点击\"取消处理\"后再关闭程序"))
+                event.ignore()
+                return
+
+        # 预览/时间戳线程：断开信号连接 + 请求中断 + 等待自然结束。
+        # 窗口即将销毁，必须确保线程完全停止，否则 QThread 对象随窗口销毁
+        # 时若仍在运行会触发崩溃；信号已断开保证中途 emit 不会访问已销毁控件。
+        self._stop_background_threads(timeout_ms=3000)
+        # 极端情况仍运行：继续等待直到结束（预览/时间戳任务量小，通常不会发生）
         if self.preview_worker is not None and self.preview_worker.isRunning():
-            self.preview_worker.quit()
-            self.preview_worker.wait(1500)
-            if self.preview_worker.isRunning():
-                self.preview_worker.terminate()
-                self.preview_worker.wait(500)
+            self.preview_worker.wait()
+        if self._ts_worker is not None and self._ts_worker.isRunning():
+            self._ts_worker.wait()
+
         event.accept()
 
 

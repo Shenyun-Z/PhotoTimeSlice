@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Callable, Optional
 from datetime import datetime
 
 from utils import iter_images, get_sorted_image_paths, sanitize_filename, FIT_SCALE_CENTER
@@ -17,13 +18,19 @@ from slices import (
 from i18n import Translator
 
 
-def get_translator(lang):
+class OperationCancelled(Exception):
+    """任务被用户主动取消时抛出。由进度回调链抛出，run_timeslice 识别并透传。"""
+
+
+def get_translator(lang: str) -> Translator:
     """获取翻译器"""
     translator = Translator(lang)
     return translator
 
 
-def generate_output_filename(base_name, include_timestamp, include_slice_type, slice_type, extension, timestamp_str=None, lang='en'):
+def generate_output_filename(base_name: str, include_timestamp: bool, include_slice_type: bool,
+                             slice_type: str, extension: str, timestamp_str: Optional[str] = None,
+                             lang: str = 'en') -> str:
     """生成输出文件名（切片类型名称随语言切换）"""
     translator = get_translator(lang)
     parts = [sanitize_filename(base_name)]
@@ -58,11 +65,15 @@ def generate_output_filename(base_name, include_timestamp, include_slice_type, s
     return f"{filename}{extension}"
 
 
-def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=False, reverse=False,
-                  sort_by='name', output_basename='timeslice', include_timestamp=False,
-                  include_slice_type=False, extension='jpg', progress_callback=None,
-                  lang='en', timestamp_source='composition',
-                  fit_strategy=FIT_SCALE_CENTER, fill_color=(0, 0, 0)):
+def run_timeslice(input_dir: str, output_dir: str, slice_type: str, position: str = "center",
+                  linear: bool = False, reverse: bool = False,
+                  sort_by: str = 'name', output_basename: str = 'timeslice',
+                  include_timestamp: bool = False,
+                  include_slice_type: bool = False, extension: str = 'jpg',
+                  progress_callback: Optional[Callable[[int], None]] = None,
+                  lang: str = 'en', timestamp_source: str = 'composition',
+                  fit_strategy: str = FIT_SCALE_CENTER,
+                  fill_color: tuple = (0, 0, 0)) -> str:
     """
     生成时间切片（纯 API 核心调度）。
 
@@ -164,6 +175,9 @@ def run_timeslice(input_dir, output_dir, slice_type, position="center", linear=F
         if result is None:
             raise Exception(f"{translator.tr('切片生成函数返回了 None，可能是内存不足或算法错误')}")
 
+    except OperationCancelled:
+        # 用户主动取消：透传，不包装成生成失败
+        raise
     except Exception as e:
         # 添加详细错误信息
         import traceback

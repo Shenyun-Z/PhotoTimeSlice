@@ -1,10 +1,13 @@
+from typing import Optional
+
 from PIL import Image, ImageDraw
 import math
 
-from ._common import iter_with_count
+from ._common import ImageSource, ProgressCallback, iter_with_count
 
 
-def create_circular_band_slice(images, progress_callback=None, num_images=None):
+def create_circular_band_slice(images: ImageSource, progress_callback: ProgressCallback = None,
+                               num_images: Optional[int] = None) -> Image.Image:
     """同心圆环带切片（由内向外）。images 可为列表或生成器（流式）。"""
     it, num_images, first = iter_with_count(images, num_images)
     if num_images == 0:

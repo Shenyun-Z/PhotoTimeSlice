@@ -1,9 +1,13 @@
+from typing import Optional
+
 from PIL import Image, ImageDraw
 
-from ._common import iter_with_count
+from ._common import ImageSource, ProgressCallback, iter_with_count
 
 
-def create_elliptical_sector_slice(images, linear=False, progress_callback=None, num_images=None):
+def create_elliptical_sector_slice(images: ImageSource, linear: bool = False,
+                                   progress_callback: ProgressCallback = None,
+                                   num_images: Optional[int] = None) -> Image.Image:
     """椭圆形 360° 等分扇形切片。images 可为列表或生成器（流式）。"""
     it, num_images, first = iter_with_count(images, num_images)
     if num_images == 0:

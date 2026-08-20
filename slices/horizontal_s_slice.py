@@ -1,7 +1,9 @@
+from typing import Optional
+
 from PIL import Image, ImageDraw
 import numpy as np
 
-from ._common import iter_with_count
+from ._common import ImageSource, ProgressCallback, iter_with_count
 
 
 def _resolve_sample_origin(position, max_offset):
@@ -47,7 +49,9 @@ def _remap_vertical_strip(strip_arr, top, bottom, img_w, img_h):
     return out, mask
 
 
-def create_horizontal_s_slice(images, position="center", linear=False, progress_callback=None, num_images=None):
+def create_horizontal_s_slice(images: ImageSource, position: str = "center", linear: bool = False,
+                              progress_callback: ProgressCallback = None,
+                              num_images: Optional[int] = None) -> Image.Image:
     """
     水平 S 型曲线时间切片（无缝、无黑缝）。
 

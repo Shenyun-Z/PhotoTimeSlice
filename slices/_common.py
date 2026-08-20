@@ -1,7 +1,16 @@
 from itertools import chain
+from typing import Callable, Iterable, Iterator, List, Optional, Tuple, Union
+
+from PIL import Image
+
+# 图片输入：列表 / 元组 / 任意迭代器（生成器流式输入）
+ImageSource = Union[Iterable[Image.Image], List[Image.Image]]
+# 进度回调：处理完第 current 张时调用
+ProgressCallback = Optional[Callable[[int], None]]
 
 
-def iter_with_count(images, num_images=None):
+def iter_with_count(images: ImageSource, num_images: Optional[int] = None
+                    ) -> Tuple[Iterator[Image.Image], int, Optional[Image.Image]]:
     """
     将图片输入规范化为统一的迭代模式。
 
