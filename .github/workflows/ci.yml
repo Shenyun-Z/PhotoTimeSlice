@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04   # 3.9 在 ubuntu-26.04 上不可用，固定 22.04
     strategy:
       fail-fast: false
       matrix:
