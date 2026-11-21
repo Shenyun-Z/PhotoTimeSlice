@@ -22,12 +22,14 @@
 
 ## 环境要求
 
-- Windows 10 / 11
+- Windows 10 / 11、macOS 或 Linux（核心切片逻辑全平台可用，界面用 PyQt6）
 - Python 3.9+
-- 依赖：`PyQt6`、`Pillow`（>= 12，需支持 PyQt6）、`numpy`、`tqdm`，RAW 支持另需 `rawpy`
+- 依赖见 `requirements.txt`：`Pillow`（>= 10.4）、`numpy`、`PyQt6`；RAW 格式另需可选依赖 `rawpy`
 
 ```bash
-pip install pyqt6 pillow numpy tqdm rawpy
+pip install -r requirements.txt
+# 需要处理 RAW（.nef/.cr2/.arw/.dng 等）时再装：
+pip install rawpy
 ```
 
 > 小提示：输入目录里的照片尺寸不一时会按所选策略自动适配（以第一张图为基准）。延时摄影 / 固定机位连拍效果最好。
@@ -148,6 +150,20 @@ run_timeslice(
 
 ---
 
+## 测试
+
+```bash
+pip install pytest
+python -m pytest tests -q
+```
+
+测试只依赖 `Pillow` + `numpy`（不需要 PyQt6），覆盖目录发现（含大写后缀）、文件名清洗、
+9 种切片的覆盖与接缝、扩展名白名单、防覆盖写入、进度回调等；CI 在 Python 3.9 / 3.12 上运行。
+
+## 更新日志
+
+见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 项目结构
 
 ```
@@ -170,6 +186,10 @@ PhotoTimeSlice/
 ├── languages/          # 翻译字典（JSON 格式）
 │   ├── zh_CN.locpak
 │   └── en.locpak
+├── tests/              # pytest 测试（纯 Pillow + numpy，无需 PyQt6）
+├── .github/workflows/  # CI（Python 3.9 / 3.12 字节编译 + 全量测试）
+├── requirements.txt    # 运行依赖（rawpy 为可选）
+├── CHANGELOG.md        # 版本更新日志
 ├── README.md
 └── LICENSE
 ```

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Tuple, Union
 from PIL import Image
 from datetime import datetime
-from i18n import Translator
+from i18n import get_translator
 
 # 判断是否为打包环境
 is_frozen = getattr(sys, 'frozen', False)
@@ -52,7 +52,7 @@ def get_file_creation_time(path: Union[str, Path]) -> float:
     """获取文件创建时间"""
     try:
         return os.path.getctime(path)
-    except:
+    except OSError:
         return os.path.getmtime(path)
 
 
@@ -61,11 +61,14 @@ def get_file_modification_time(path: Union[str, Path]) -> float:
     return os.path.getmtime(path)
 
 
-# 支持的图片格式（glob 通配）
-IMAGE_EXTENSIONS = [
-    "*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
-    "*.nef", "*.dng", "*.cr2", "*.cr3", "*.arw", "*.raf", "*.orf", "*.rw2"
-]
+# 支持的图片后缀（按下标小写匹配，大小写不敏感）
+IMAGE_SUFFIXES = {
+    '.jpg', '.jpeg', '.png', '.tif', '.tiff',
+    '.nef', '.dng', '.cr2', '.cr3', '.arw', '.raf', '.orf', '.rw2'
+}
+
+# 支持的图片格式（glob 通配，保留兼容旧调用方）
+IMAGE_EXTENSIONS = ["*" + suffix for suffix in IMAGE_SUFFIXES]
 
 # RAW 格式后缀（需 rawpy 支持）
 RAW_SUFFIXES = {'.nef', '.dng', '.cr2', '.cr3', '.arw', '.raf', '.orf', '.rw2'}
@@ -80,7 +83,7 @@ FIT_STRATEGIES = (FIT_SCALE_CENTER, FIT_CROP_CENTER, FIT_STRETCH, FIT_NONE)
 
 def open_image_single(path: Union[str, Path], lang: str = 'en') -> Image.Image:
     """打开单张图片（支持 RAW），返回 PIL.Image；失败抛出明确异常"""
-    translator = Translator(lang)
+    translator = get_translator(lang)
     path = Path(path)
     if path.suffix.lower() in RAW_SUFFIXES:
         try:
@@ -151,7 +154,7 @@ def iter_images(input_dir: Union[str, Path], sort_by: str = 'name', reverse: boo
     以第一张图片为基准尺寸，后续图片按 fit_strategy 自动适配。
     逐张打开 / 处理 / 释放，避免一次性将所有图片载入内存。
     """
-    translator = Translator(lang)
+    translator = get_translator(lang)
     if not os.path.exists(input_dir):
         raise FileNotFoundError(f"{translator.tr('输入目录不存在:')} {input_dir}")
 
@@ -176,7 +179,7 @@ def iter_images(input_dir: Union[str, Path], sort_by: str = 'name', reverse: boo
 def load_images(input_dir: Union[str, Path], sort_by: str = 'name', reverse: bool = False,
                 lang: str = 'en') -> List[Image.Image]:
     """加载目录中的全部图片到列表（一次性载入，兼容性接口；大目录请使用 iter_images）"""
-    translator = Translator(lang)
+    translator = get_translator(lang)
     if not os.path.exists(input_dir):
         raise FileNotFoundError(f"{translator.tr('输入目录不存在:')} {input_dir}")
 
@@ -193,11 +196,20 @@ def load_images(input_dir: Union[str, Path], sort_by: str = 'name', reverse: boo
 def get_sorted_image_paths(input_dir: Union[str, Path], sort_by: str = 'name',
                            reverse: bool = False) -> List[Path]:
     """返回排序后的图片路径列表（不加载图像，用于时间戳计算）"""
-    image_extensions = list(IMAGE_EXTENSIONS)
-
+    # 单次遍历目录并按下标小写匹配：避免 13 次 glob 及大小写敏感文件系统
+    # 下 .JPG / .PNG 等大写后缀被漏掉的问题（相机默认常输出大写后缀）
     image_paths = []
-    for ext in image_extensions:
-        image_paths.extend(Path(input_dir).glob(ext))
+    try:
+        with os.scandir(str(input_dir)) as entries:
+            for entry in entries:
+                if os.path.splitext(entry.name)[1].lower() in IMAGE_SUFFIXES:
+                    try:
+                        if entry.is_file():
+                            image_paths.append(Path(entry.path))
+                    except OSError:
+                        continue
+    except OSError:
+        return []
 
     if sort_by == 'name':
         image_paths.sort(key=natural_sort_key)

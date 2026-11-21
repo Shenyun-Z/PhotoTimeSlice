@@ -36,6 +36,8 @@ def iter_with_count(images: ImageSource, num_images: Optional[int] = None
         else:
             rest = list(it)
             num_images = 1 + len(rest)
-            it = chain([first], rest)
+            # 注意：rest 不含 first，此处直接沿用 rest，
+            # 否则末尾 chain([first], ...) 会把第一张图片重复计入
+            it = iter(rest)
 
     return chain([first], it), num_images, first

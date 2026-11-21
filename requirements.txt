@@ -1,0 +1,8 @@
+# 运行依赖（核心切片 API + 图形界面）
+# 安装：pip install -r requirements.txt
+Pillow>=10.4,<14
+numpy>=1.26,<3
+PyQt6>=6.6,<7          # 仅图形界面需要；纯 API 调用可省略
+
+# 可选：RAW 格式支持（.nef/.cr2/.arw/.dng/.raf/.orf/.rw2）
+# pip install rawpy>=0.19

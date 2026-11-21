@@ -1,9 +1,10 @@
 import os
+import subprocess
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QComboBox, QLineEdit, QCheckBox, QFileDialog, QProgressBar,
                              QGroupBox, QMessageBox, QTextEdit, QMenuBar, QMenu)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent, QSettings, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
 from PyQt6.QtGui import QPalette, QColor, QFont, QPainter, QMouseEvent, QPixmap, QAction
 from PIL import Image
 from PIL.ImageQt import toqpixmap
@@ -14,7 +15,9 @@ if getattr(sys, 'frozen', False):
 else:
     application_path = os.path.dirname(os.path.abspath(__file__))
 
-sys.path.insert(0, application_path)
+if application_path not in sys.path:
+    # 追加到末尾而不是插到首位：避免脚本目录内的同名文件遮蔽标准库/第三方模块
+    sys.path.append(application_path)
 
 from cli import run_timeslice
 from i18n import Translator  # 导入翻译器
@@ -95,14 +98,14 @@ FIT_MAP = {
 }
 
 
-class LogEvent(QEvent):
-    """用于线程安全日志更新的自定义事件"""
-    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
-
-    def __init__(self, text, is_error=False):
-        super().__init__(LogEvent.EVENT_TYPE)
-        self.text = text
-        self.is_error = is_error
+def open_in_default_viewer(path):
+    """用系统默认程序打开文件（跨 Windows / macOS / Linux）"""
+    if sys.platform.startswith("win"):
+        os.startfile(path)  # noqa: 仅 Windows 存在
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
 
 
 class TimesliceWorker(QThread):
@@ -139,7 +142,7 @@ class TimesliceWorker(QThread):
             if total_images == 0:
                 raise Exception(self.tr("输入目录中没有找到图片"))
 
-            self.log_signal.emit(f"找到 {total_images} 张图片，开始处理...")
+            self.log_signal.emit(self.tr("找到 {n} 张图片，开始处理...").format(n=total_images))
 
             def progress_callback(current):
                 if self._cancel_requested:
@@ -220,7 +223,7 @@ class PreviewWorker(QThread):
             for path in paths:
                 if self.isInterruptionRequested():
                     return
-                img = open_image_single(path, 'en')
+                img = open_image_single(path, self.params.get('lang', 'en'))
                 img.thumbnail((preview_max_side, preview_max_side), Image.LANCZOS)
                 img = img.convert('RGB')
                 if base_size is None:
@@ -406,9 +409,69 @@ class TimesliceGUI(QMainWindow):
         self._ts_timer.setInterval(300)       # 防抖：合并连续输入产生的计算请求
         self._ts_timer.timeout.connect(self._start_timestamp_worker)
 
+        # 恢复上次会话的界面设置（目录、参数、开关）
+        self._load_ui_settings()
+
     def tr(self, text):
         """翻译方法"""
         return self.translator.tr(text)
+
+    # ---------- 界面设置持久化 ----------
+    _UI_SETTING_KEYS = (
+        'input_dir', 'output_dir', 'basename', 'type_index', 'position_index',
+        'sort_index', 'extension_index', 'timestamp_source_index', 'fit_index',
+    )
+    _UI_SETTING_FLAGS = ('linear', 'reverse', 'auto_open', 'timestamp', 'slice_type')
+
+    def _load_ui_settings(self):
+        """恢复上次关闭时的界面设置（只恢复索引与开关，文本按当前语言重建）"""
+        st = self.settings
+        try:
+            self.input_dir_edit.setText(st.value('input_dir', '', type=str) or '')
+            self.output_dir_edit.setText(st.value('output_dir', '', type=str) or '')
+            self.basename_edit.setText(st.value('basename', 'timeslice', type=str) or 'timeslice')
+            # 先恢复切片类型（其信号会重建位置选项），再恢复其余控件
+            self.type_combo.setCurrentIndex(st.value('type_index', 0, type=int))
+            self.position_combo.setCurrentIndex(st.value('position_index', 1, type=int))
+            self.sort_combo.setCurrentIndex(st.value('sort_index', 0, type=int))
+            self.extension_combo.setCurrentIndex(st.value('extension_index', 0, type=int))
+            self.fit_combo.setCurrentIndex(st.value('fit_index', 0, type=int))
+            self.timestamp_source_combo.setCurrentIndex(
+                st.value('timestamp_source_index', 4, type=int))
+            for key in self._UI_SETTING_FLAGS:
+                widget = {'linear': self.linear_switch,
+                          'reverse': self.reverse_check,
+                          'auto_open': self.auto_open_check,
+                          'timestamp': self.timestamp_check,
+                          'slice_type': self.slice_type_check}[key]
+                default = False
+                widget.setChecked(st.value(key, default, type=bool))
+        except (TypeError, ValueError, RuntimeError):
+            # 设置项损坏时忽略，按默认值启动，不阻断界面
+            pass
+        self.update_timestamp_source_state()
+        self.update_filename_preview()
+
+    def _save_ui_settings(self):
+        """保存当前界面设置到 QSettings"""
+        st = self.settings
+        st.setValue('input_dir', self.input_dir_edit.text())
+        st.setValue('output_dir', self.output_dir_edit.text())
+        st.setValue('basename', self.basename_edit.text())
+        st.setValue('type_index', self.type_combo.currentIndex())
+        st.setValue('position_index', self.position_combo.currentIndex())
+        st.setValue('sort_index', self.sort_combo.currentIndex())
+        st.setValue('extension_index', self.extension_combo.currentIndex())
+        st.setValue('timestamp_source_index', self.timestamp_source_combo.currentIndex())
+        st.setValue('fit_index', self.fit_combo.currentIndex())
+        for key in self._UI_SETTING_FLAGS:
+            widget = {'linear': self.linear_switch,
+                      'reverse': self.reverse_check,
+                      'auto_open': self.auto_open_check,
+                      'timestamp': self.timestamp_check,
+                      'slice_type': self.slice_type_check}[key]
+            st.setValue(key, widget.isChecked())
+        st.sync()
 
     def _build_localized_maps(self):
         """按当前语言构建本地化映射缓存（语言切换时重建）"""
@@ -1400,6 +1463,7 @@ class TimesliceGUI(QMainWindow):
             'sort_by': self._l_sort.get(self.sort_combo.currentText(), "name"),
             'reverse': self.reverse_check.isChecked(),
             'fit_strategy': self._l_fit.get(self.fit_combo.currentText(), FIT_SCALE_CENTER),
+            'lang': self.current_lang,
         }
 
     def _schedule_preview(self):
@@ -1584,10 +1648,10 @@ class TimesliceGUI(QMainWindow):
         # 任务结束，恢复语言菜单可用
         self.update_menu_check_state()
 
-        # Windows自动打开图片
+        # 完成后自动打开图片（跨平台）
         if self.auto_open_check.isChecked():
             try:
-                os.startfile(output_path)
+                open_in_default_viewer(output_path)
             except Exception as e:
                 self.error_log.append(f"{self.tr('无法打开图片:')} {str(e)}")
 
@@ -1623,6 +1687,7 @@ class TimesliceGUI(QMainWindow):
         if self._ts_worker is not None and self._ts_worker.isRunning():
             self._ts_worker.wait()
 
+        self._save_ui_settings()
         event.accept()
 
 

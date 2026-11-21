@@ -15,7 +15,24 @@ from slices import (
     create_vertical_s_slice,
     create_horizontal_s_slice
 )
-from i18n import Translator
+from i18n import Translator, get_translator as _cached_translator
+
+
+# 允许的输出格式白名单（扩展名不可来自调用方的任意字符串）
+ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'webp'}
+
+
+def normalize_extension(extension: str, lang: str = 'en') -> str:
+    """校验并规范化输出扩展名。
+
+    扩展名会被拼进输出文件名，必须限制在白名单内，否则形如
+    ``extension="png/../../x"`` 的取值会把文件写到输出目录之外（路径穿越）。
+    """
+    ext = str(extension or '').strip().lstrip('.').lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        translator = get_translator(lang)
+        raise ValueError(f"{translator.tr('不支持的文件格式:')} {extension}")
+    return ext
 
 
 class OperationCancelled(Exception):
@@ -23,9 +40,8 @@ class OperationCancelled(Exception):
 
 
 def get_translator(lang: str) -> Translator:
-    """获取翻译器"""
-    translator = Translator(lang)
-    return translator
+    """获取翻译器（按语言缓存的实例，避免每张图片重复解析语言包）"""
+    return _cached_translator(lang)
 
 
 def generate_output_filename(base_name: str, include_timestamp: bool, include_slice_type: bool,
@@ -85,6 +101,8 @@ def run_timeslice(input_dir: str, output_dir: str, slice_type: str, position: st
       - none        ：尺寸不一致时报错
     """
     translator = get_translator(lang)
+    # 扩展名白名单校验（防路径穿越 + 稳定格式分支）
+    extension = normalize_extension(extension, lang)
 
     # 确保输入目录存在
     if not os.path.exists(input_dir):
@@ -184,19 +202,23 @@ def run_timeslice(input_dir: str, output_dir: str, slice_type: str, position: st
         error_details = traceback.format_exc()
         raise Exception(f"{translator.tr('生成切片失败:')}\n{str(e)}\n{error_details}")
 
-    # 保存图片
+    # 保存图片：先写同目录临时文件再原子替换，避免中断/崩溃留下半个文件
+    tmp_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
     try:
         # 根据扩展名选择保存参数
-        if extension.lower() in ['jpg', 'jpeg']:
-            result.save(output_path, "JPEG", quality=100, subsampling=0)
-        elif extension.lower() == 'png':
-            result.save(output_path, "PNG", optimize=True)
-        elif extension.lower() == 'webp':
-            result.save(output_path, "WEBP", quality=95)
-        else:
-            # 默认使用JPEG
-            result.save(output_path, "JPEG", quality=100, subsampling=0)
+        if extension in ['jpg', 'jpeg']:
+            result.save(tmp_path, "JPEG", quality=100, subsampling=0)
+        elif extension == 'png':
+            result.save(tmp_path, "PNG", optimize=True)
+        else:  # webp
+            result.save(tmp_path, "WEBP", quality=95)
+        os.replace(tmp_path, output_path)
     except Exception as e:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
         raise Exception(f"{translator.tr('保存图片失败:')} {str(e)}")
 
     return str(output_path)
