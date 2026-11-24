@@ -103,3 +103,18 @@ def test_compute_timestamp_falls_back_to_mtime(make_photos):
 def test_exif_capture_time_absent(make_photos):
     folder = make_photos(n=1)
     assert utils.get_exif_capture_time(utils.get_sorted_image_paths(folder)[0]) is None
+
+
+def test_exif_orientation_is_applied(tmp_path):
+    """手机竖拍照片（像素横放 + Orientation=6）应按方向摆正，否则切片会“躺倒”。"""
+    path = tmp_path / "portrait.jpg"
+    img = Image.new("RGB", (200, 100), (200, 0, 0))
+    exif = img.getexif()
+    exif[0x0112] = 6
+    img.save(path, exif=exif)
+    assert utils.open_image_single(path).size == (100, 200)
+
+
+def test_no_orientation_tag_keeps_size(make_photos):
+    folder = make_photos(n=1, size=(240, 180))
+    assert utils.open_image_single(utils.get_sorted_image_paths(folder)[0]).size == (240, 180)

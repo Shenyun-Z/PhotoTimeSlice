@@ -3,7 +3,7 @@ import sys
 import os
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple, Union
-from PIL import Image
+from PIL import Image, ImageOps
 from datetime import datetime
 from i18n import get_translator
 
@@ -96,6 +96,14 @@ def open_image_single(path: Union[str, Path], lang: str = 'en') -> Image.Image:
     try:
         img = Image.open(path)
         img.load()  # 强制读取像素数据，尽早暴露损坏文件
+        # 按 EXIF Orientation 摆正方向：手机竖拍照片常以横向像素 + 方向标记存储，
+        # 不处理会导致切片里出现“躺着”的照片（仅在标记非 1 时才复制，避免无谓内存开销）
+        try:
+            orientation = img.getexif().get(0x0112, 1)
+        except Exception:
+            orientation = 1
+        if orientation not in (None, 1):
+            img = ImageOps.exif_transpose(img)
         return img
     except (Image.DecompressionBombError, Image.DecompressionBombWarning):
         # 超大图 / 解压炸弹：给出明确提示，避免抛出难以理解的 Pillow 内部异常
