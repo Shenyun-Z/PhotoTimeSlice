@@ -18,6 +18,10 @@ def create_circular_sector_slice(images: ImageSource, linear: bool = False,
     result = Image.new('RGB', (img_w, img_h), (0, 0, 0))
     angle_step = 360 / num_images
 
+    # mask 复用：循环外创建一次，每轮清零后重绘，避免逐图分配全尺寸缓冲
+    mask = Image.new('L', (img_w, img_h), 0)
+    mask_draw = ImageDraw.Draw(mask)
+
     for i, src_img in enumerate(it):
         start_angle = i * angle_step
         end_angle = (i + 1) * angle_step
@@ -27,15 +31,13 @@ def create_circular_sector_slice(images: ImageSource, linear: bool = False,
             # 线性模式：半径从最小逐步增长到最大，保证第 1 张也可见
             r = radius * ((i + 1) / num_images) if num_images > 1 else radius
 
-        mask = Image.new('L', (img_w, img_h), 0)
-        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rectangle([0, 0, img_w, img_h], fill=0)
         mask_draw.pieslice(
             [center_x - r, center_y - r,
              center_x + r, center_y + r],
             start_angle, end_angle, fill=255
         )
-        masked_img = Image.composite(src_img, result, mask)
-        result.paste(masked_img, (0, 0))
+        result.paste(src_img, (0, 0), mask)
 
         if progress_callback:
             progress_callback(i + 1)

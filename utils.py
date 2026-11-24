@@ -97,6 +97,13 @@ def open_image_single(path: Union[str, Path], lang: str = 'en') -> Image.Image:
         img = Image.open(path)
         img.load()  # 强制读取像素数据，尽早暴露损坏文件
         return img
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        # 超大图 / 解压炸弹：给出明确提示，避免抛出难以理解的 Pillow 内部异常
+        raise RuntimeError(
+            f"{translator.tr('图片像素总数超出安全上限，已拒绝加载')}: {path} "
+            f"(max {Image.MAX_IMAGE_PIXELS} px)")
+    except Image.UnidentifiedImageError:
+        raise RuntimeError(f"{translator.tr('无法识别的图片格式或文件已损坏')}: {path}")
     except Exception as e:
         raise RuntimeError(f"{translator.tr('无法打开图片')} {path}: {e}")
 

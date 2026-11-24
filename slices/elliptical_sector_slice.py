@@ -19,6 +19,10 @@ def create_elliptical_sector_slice(images: ImageSource, linear: bool = False,
     result = Image.new('RGB', (img_w, img_h), (0, 0, 0))
     angle_step = 360 / num_images
 
+    # mask 复用：循环外创建一次，每轮清零后重绘，避免逐图分配全尺寸缓冲
+    mask = Image.new('L', (img_w, img_h), 0)
+    mask_draw = ImageDraw.Draw(mask)
+
     for i, src_img in enumerate(it):
         start_angle = i * angle_step
         end_angle = (i + 1) * angle_step
@@ -39,8 +43,7 @@ def create_elliptical_sector_slice(images: ImageSource, linear: bool = False,
         mask = Image.new('L', (img_w, img_h))
         mask_draw = ImageDraw.Draw(mask)
         mask_draw.pieslice(ellipse_bbox, start_angle, end_angle, fill=255)
-        masked_img = Image.composite(src_img, result, mask)
-        result.paste(masked_img, (0, 0))
+        result.paste(src_img, (0, 0), mask)
 
         if progress_callback:
             progress_callback(i + 1)

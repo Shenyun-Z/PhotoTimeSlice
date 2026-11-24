@@ -32,3 +32,17 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests -q
+
+  audit:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      # 依赖漏洞扫描：requirements.txt 中的版本若命中已知 CVE 则失败
+      - name: Audit dependencies
+        run: pip-audit -r requirements.txt

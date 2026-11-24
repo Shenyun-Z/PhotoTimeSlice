@@ -22,6 +22,10 @@ def create_circular_band_slice(images: ImageSource, progress_callback: ProgressC
         # (i+1)/num_images 保证最外圈恰好达到最大半径，避免外圈黑边
         return min_radius + (max_radius - min_radius) * math.sqrt((i + 1) / num_images)
 
+    # mask 复用：循环外创建一次，每轮清零后重绘，避免逐图分配全尺寸缓冲
+    mask = Image.new('L', (img_w, img_h), 0)
+    mask_draw = ImageDraw.Draw(mask)
+
     for i, src_img in enumerate(it):
         radius = ring_radius(i)
         left = center_x - radius
@@ -29,8 +33,7 @@ def create_circular_band_slice(images: ImageSource, progress_callback: ProgressC
         right = center_x + radius
         bottom = center_y + radius
 
-        mask = Image.new('L', (img_w, img_h), 0)
-        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rectangle([0, 0, img_w, img_h], fill=0)
         mask_draw.ellipse([left, top, right, bottom], fill=255)
 
         if i > 0:
@@ -41,8 +44,7 @@ def create_circular_band_slice(images: ImageSource, progress_callback: ProgressC
             prev_bottom = center_y + prev_radius
             mask_draw.ellipse([prev_left, prev_top, prev_right, prev_bottom], fill=0)
 
-        masked_img = Image.composite(src_img, result, mask)
-        result.paste(masked_img, (0, 0))
+        result.paste(src_img, (0, 0), mask)
 
         if progress_callback:
             progress_callback(i + 1)
